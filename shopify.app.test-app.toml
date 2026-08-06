@@ -2,8 +2,10 @@
 
 client_id = "3e7fe0a9171bb4ce8183a0e8ce1b21e4"
 name = "test-app"
-application_url = "https://example.com"
+application_url = "https://shopify-app.solorak.xyz"
 embedded = true
+
+[build]
 
 [webhooks]
 api_version = "2026-10"
@@ -13,4 +15,8 @@ api_version = "2026-10"
 scopes = "write_metaobject_definitions,write_metaobjects,write_products"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://shopify-app.solorak.xyz/auth/callback",
+  "https://shopify-app.solorak.xyz/auth/shopify/callback",
+  "https://shopify-app.solorak.xyz/api/auth/callback",
+]
