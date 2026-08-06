@@ -1,3 +1,25 @@
 .cache
+.git
+.github
+.claude
+.cursor
+.gemini
+.shopify
+.react-router
 build
 node_modules
+extensions/*/dist
+
+# Never bake secrets or a local database into the image
+.env
+.env.*
+!.env.example
+prisma/dev.sqlite
+prisma/dev.sqlite-journal
+*.db
+*.db-journal
+
+# Deployment assets are used by the host, not the app image
+deploy
+DEPLOYMENT.md
+*.log

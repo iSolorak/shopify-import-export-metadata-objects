@@ -1,0 +1,44 @@
+# Production stack for a single VPS.
+#
+# TLS and reverse proxying are handled by the nginx already running on the host,
+# not by a container. This file only runs the app, publishing it on a loopback
+# port for the host nginx to proxy to.
+#
+#   cp .env.example .env          # fill in the Shopify keys and SHOPIFY_APP_URL
+#   docker compose up -d --build
+#
+# Host nginx config to copy: deploy/nginx/shopify-app.conf
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # Overrides whatever is in .env: inside the container the database always
+      # lives on the mounted volume.
+      DATABASE_URL: file:/data/prod.sqlite
+    volumes:
+      - app-data:/data
+    # Bound to loopback only. The app is never reachable from the internet
+    # except through the host nginx, which terminates TLS.
+    # Change APP_PORT in .env if 3000 is already taken on the host.
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  app-data:

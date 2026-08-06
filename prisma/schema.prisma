@@ -10,7 +10,10 @@ generator client {
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
   provider = "sqlite"
-  url      = "file:dev.sqlite"
+  // Relative paths resolve against prisma/, so local dev keeps using prisma/dev.sqlite.
+  // In production this points at an absolute path on a mounted volume, e.g.
+  // file:/data/prod.sqlite — see .env.example.
+  url      = env("DATABASE_URL")
 }
 
 // A tiny example model: one banner setting per shop.
