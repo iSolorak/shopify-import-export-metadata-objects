@@ -2,7 +2,7 @@
 
 client_id = "ab6e8005f4791aae2959d1e31c42bbd9"
 name = "developing-testing"
-application_url = "https://example.com"
+application_url = "https://shopify-app.solorak.xyz"
 embedded = true
 
 [build]
@@ -34,10 +34,14 @@ api_version = "2026-10"
 scopes = "write_products,write_metaobjects,write_metaobject_definitions"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://shopify-app.solorak.xyz/auth/callback",
+  "https://shopify-app.solorak.xyz/auth/shopify/callback",
+  "https://shopify-app.solorak.xyz/api/auth/callback",
+]
 
 [app_proxy]
-url = "https://example.com/apps/banner"
+url = "https://shopify-app.solorak.xyz/apps/banner"
 subpath = "banner"
 prefix = "apps"
 

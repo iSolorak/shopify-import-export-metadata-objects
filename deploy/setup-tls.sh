@@ -17,7 +17,13 @@
 
 set -euo pipefail
 
-DOMAIN="${DOMAIN:-shopify-app.solorak.xyz}"
+# The values baked into deploy/nginx/shopify-app.conf. That file is installable
+# as-is; this script only rewrites these two when DOMAIN/APP_PORT ask for
+# something else. Keep them in sync with the conf.
+CONF_DOMAIN="shop-app.solorak.xyz"
+CONF_PORT="3000"
+
+DOMAIN="${DOMAIN:-$CONF_DOMAIN}"
 EMAIL="${EMAIL:-}"
 WEBROOT="${WEBROOT:-/var/www/certbot}"
 STAGING="${STAGING:-0}"
@@ -59,7 +65,7 @@ APP_PORT="${APP_PORT:-}"
 if [ -z "$APP_PORT" ] && [ -f "$REPO_DIR/.env" ]; then
     APP_PORT="$(grep -E '^\s*APP_PORT=' "$REPO_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '"'\''[:space:]' || true)"
 fi
-APP_PORT="${APP_PORT:-3000}"
+APP_PORT="${APP_PORT:-$CONF_PORT}"
 
 # ---------------------------------------------------------------------------
 # Where does nginx actually read site configs from?
@@ -96,16 +102,13 @@ install_stage() {  # install_stage <with-tls: 0|1> <label>
     # nginx refuses to load a config that points at a missing certificate.
     local strip=(-e '/^# \(BEGIN\|END\) TLS$/d')
     [ "$with_tls" = "1" ] || strip=(-e '/^# BEGIN TLS$/,/^# END TLS$/d')
-    sed -e "s/__DOMAIN__/$DOMAIN/g" -e "s/__APP_PORT__/$APP_PORT/g" "${strip[@]}" "$SRC" > "$TARGET"
-
-    # `http2 on;` is nginx >= 1.25.1. Older builds need it on the listen line.
-    local ver
-    ver="$(nginx -v 2>&1 | sed -n 's#.*nginx/\([0-9.]*\).*#\1#p')"
-    if grep -q '^\s*http2 on;$' "$TARGET" \
-       && [ -n "$ver" ] && [ "$(printf '%s\n1.25.1\n' "$ver" | sort -V | head -1)" != "1.25.1" ]; then
-        sed -i -e '/^\s*http2 on;$/d' -e 's/^\(\s*listen \(\[::\]:\)\?443 ssl\);$/\1 http2;/' "$TARGET"
-        warn "nginx $ver: rewrote http2 onto the listen directives"
-    fi
+    # The conf ships with the real domain and port already in it, so these two
+    # substitutions are no-ops on a default run and only bite when DOMAIN or
+    # APP_PORT override them. The port pattern is anchored to the loopback
+    # address so it cannot match a port number elsewhere in the file.
+    sed -e "s/${CONF_DOMAIN//./\\.}/$DOMAIN/g" \
+        -e "s/127\.0\.0\.1:$CONF_PORT/127.0.0.1:$APP_PORT/g" \
+        "${strip[@]}" "$SRC" > "$TARGET"
 
     case "$TARGET" in
         */sites-available/*)
