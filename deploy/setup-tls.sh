@@ -24,8 +24,7 @@ STAGING="${STAGING:-0}"
 FORCE="${FORCE:-0}"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_HTTP="$REPO_DIR/deploy/nginx/shopify-app.conf"
-SRC_TLS="$REPO_DIR/deploy/nginx/shopify-app-tls.conf"
+SRC="$REPO_DIR/deploy/nginx/shopify-app.conf"
 TARGET_NAME="shopify-app.conf"
 
 # All progress output goes to stderr so it stays correctly ordered against the
@@ -51,7 +50,9 @@ restore_and_die() {  # restore_and_die <backup-path-or-empty> <message>
 [ "$(id -u)" -eq 0 ] || die "run with sudo"
 command -v nginx   >/dev/null || die "nginx is not installed"
 command -v certbot >/dev/null || die "certbot is not installed (apt install certbot)"
-[ -f "$SRC_HTTP" ] && [ -f "$SRC_TLS" ] || die "run this from the repo checkout"
+[ -f "$SRC" ] || die "run this from the repo checkout"
+grep -q '^# BEGIN TLS$' "$SRC" && grep -q '^# END TLS$' "$SRC" \
+    || die "$SRC is missing its BEGIN/END TLS markers — stage 1 cannot strip the 443 block"
 
 # APP_PORT must match the loopback port docker-compose.yml publishes.
 APP_PORT="${APP_PORT:-}"
@@ -83,14 +84,19 @@ else
     die "$NGINX_CONF includes neither conf.d/* nor sites-enabled/*; add an include and re-run"
 fi
 
-install_stage() {  # install_stage <source-file> <label>
-    local src="$1" label="$2"
+install_stage() {  # install_stage <with-tls: 0|1> <label>
+    local with_tls="$1" label="$2"
     local backup=""
     if [ -f "$TARGET" ]; then
         backup="$TARGET.bak-$(date +%Y%m%d%H%M%S)"
         cp "$TARGET" "$backup"
     fi
-    sed -e "s/__DOMAIN__/$DOMAIN/g" -e "s/__APP_PORT__/$APP_PORT/g" "$src" > "$TARGET"
+
+    # Stage 1 drops the 443 block: its ssl_certificate does not exist yet, and
+    # nginx refuses to load a config that points at a missing certificate.
+    local strip=(-e '/^# \(BEGIN\|END\) TLS$/d')
+    [ "$with_tls" = "1" ] || strip=(-e '/^# BEGIN TLS$/,/^# END TLS$/d')
+    sed -e "s/__DOMAIN__/$DOMAIN/g" -e "s/__APP_PORT__/$APP_PORT/g" "${strip[@]}" "$SRC" > "$TARGET"
 
     # `http2 on;` is nginx >= 1.25.1. Older builds need it on the listen line.
     local ver
@@ -123,7 +129,7 @@ install_stage() {  # install_stage <source-file> <label>
 }
 
 say "Installing the HTTP config (stage 1)"
-install_stage "$SRC_HTTP" "HTTP"
+install_stage 0 "HTTP"
 
 # The config can be syntactically fine and still not be the block that serves
 # this hostname. Confirm nginx has really loaded it.
@@ -223,7 +229,7 @@ fi
 # ---------------------------------------------------------------------------
 say "Installing the TLS config (stage 2)"
 [ -f "$LIVE" ] || die "no certificate at $LIVE"
-install_stage "$SRC_TLS" "TLS"
+install_stage 1 "TLS"
 
 # A reload is graceful: workers running the previous config keep serving until
 # their in-flight connections drain, so probing immediately can still hit the

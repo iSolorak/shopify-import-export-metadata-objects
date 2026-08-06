@@ -165,11 +165,17 @@ means the installed config is yours to edit — renewals will not rewrite it.
 
 ### The two config stages
 
-`deploy/nginx/shopify-app.conf` (HTTP only) is installed first so nginx
-validates before any certificate exists; `deploy/nginx/shopify-app-tls.conf`
-replaces it afterwards, at the same path, so the `upstream` block is never
-duplicated. Both keep `/.well-known/acme-challenge/` above the redirect, so
-renewal does not depend on the certificate being renewed.
+There is one config file, `deploy/nginx/shopify-app.conf`, installed twice.
+nginx will not load a config whose `ssl_certificate` does not exist yet, so on
+the first pass the installer strips the 443 server block — everything between
+the `# BEGIN TLS` / `# END TLS` markers — obtains the certificate over plain
+HTTP, then reinstalls the file whole at the same path. Keep those markers on
+their own lines if you edit the file.
+
+The port 80 block is identical in both passes: it serves
+`/.well-known/acme-challenge/` above the redirect, so renewal never depends on
+the certificate being renewed. It never proxies to the app — Shopify only ever
+reaches this app over HTTPS.
 
 Renewal runs from certbot's own systemd timer and reloads nginx through the
 deploy hook the installer registers. Rehearse it with `sudo certbot renew
@@ -181,7 +187,7 @@ Two details in that config are load-bearing:
   redirect URLs and Shopify rejects the callback.
 - **No** `X-Frame-Options` or `frame-ancestors` CSP. The app renders in an
   iframe inside the Shopify admin and the Shopify library already sends the
-  correct per-shop header. Both configs carry `proxy_hide_header
+  correct per-shop header. The config carries `proxy_hide_header
   X-Frame-Options` so that a header set globally in a shared `nginx.conf` — very
   likely on a box already hosting other sites — cannot leak through and make
   the embedded app render blank.
