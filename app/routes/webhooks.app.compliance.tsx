@@ -12,10 +12,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   switch (topic) {
     // A customer asked the merchant for the data this app holds on them.
-    // This app stores no customer-identifiable data — only per-shop banner
-    // settings and OAuth sessions — so there is nothing to return. If you
-    // later store customer data, you must deliver it to the merchant within
-    // 30 days; log the request here so you have a record of it.
+    // This app stores no customer-identifiable data — only OAuth sessions —
+    // so there is nothing to return. Metaobject data lives in Shopify, not
+    // here. If you later store customer data, you must deliver it to the
+    // merchant within 30 days; log the request here so you have a record of it.
     case "CUSTOMERS_DATA_REQUEST":
       console.log(
         `No customer data stored for ${shop}; request payload:`,
@@ -28,8 +28,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       break;
 
     // Sent 48 hours after uninstall. Erase everything belonging to this shop.
+    // Sessions are all this app persists.
     case "SHOP_REDACT":
-      await db.banner.deleteMany({ where: { shop } });
       await db.session.deleteMany({ where: { shop } });
       break;
 

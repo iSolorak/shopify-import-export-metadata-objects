@@ -16,16 +16,6 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// A tiny example model: one banner setting per shop.
-// `shop` is unique so each store has exactly one row we upsert into.
-model Banner {
-  id        String   @id @default(cuid())
-  shop      String   @unique
-  enabled   Boolean  @default(false)
-  message   String   @default("")
-  updatedAt DateTime @updatedAt
-}
-
 model Session {
   id            String    @id
   shop          String

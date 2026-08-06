@@ -1,352 +1,459 @@
-import { useEffect } from "react";
-import type {
-  ActionFunctionArgs,
-  HeadersFunction,
-  LoaderFunctionArgs,
-} from "react-router";
-import { useFetcher } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
+import { useState } from "react";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
+
 import { authenticate } from "../shopify.server";
-import { boundary } from "@shopify/shopify-app-react-router/server";
+import { parseCsv, rowsToRecords } from "../lib/csv";
+import {
+  createDefinition,
+  getDefinition,
+  getEntries,
+  listDefinitions,
+  upsertEntry,
+} from "../lib/metaobjects.server";
+import {
+  isDefinitionCsv,
+  planDefinitionImport,
+  planEntryImport,
+  type ImportPlan,
+} from "../lib/metaobject-csv";
+
+// The app's only page: export metaobjects to CSV, and import a CSV back to
+// create or update them.
+//
+// An import is two round trips. "plan" reads the file and reports what would
+// change; "apply" performs the writes. The CSV text rides along in a hidden
+// field between them so confirming does not require re-picking the file.
+type ActionData =
+  | { step: "plan"; plan: ImportPlan; csv: string; type: string }
+  | { step: "plan-definition"; summary: string[]; csv: string }
+  | { step: "applied"; created: number; updated: number; failures: string[] }
+  | { step: "error"; message: string };
+
+// A single import runs one mutation per changed row against a rate-limited API.
+// Past this many rows the request outlives a sensible HTTP timeout, so the file
+// is rejected with an explanation rather than dying halfway through.
+const MAX_ROWS = 1000;
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
-  return null;
+  return { definitions: await listDefinitions(admin) };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-            demoInfo: metafield(namespace: "$app", key: "demo_info") {
-              jsonValue
-            }
-          }
+
+  const formData = await request.formData();
+  const intent = String(formData.get("intent") ?? "");
+
+  try {
+    // --- Step 1: read the file and report what it would do ----------------
+    if (intent === "plan") {
+      const file = formData.get("file");
+      if (!(file instanceof File) || file.size === 0) {
+        return { step: "error", message: "Choose a CSV file first." } as const;
+      }
+
+      const csv = await file.text();
+      const rows = parseCsv(csv);
+      if (rows.length < 2) {
+        return {
+          step: "error",
+          message: "That file has a header row but no data rows.",
+        } as const;
+      }
+      if (rows.length - 1 > MAX_ROWS) {
+        return {
+          step: "error",
+          message: `That file has ${rows.length - 1} rows. Import at most ${MAX_ROWS} at a time.`,
+        } as const;
+      }
+
+      const records = rowsToRecords(rows);
+
+      if (isDefinitionCsv(rows[0])) {
+        const definitions = planDefinitionImport(records);
+        return {
+          step: "plan-definition",
+          csv,
+          summary: definitions.map(
+            (d) =>
+              `${d.name} (${d.type}) — ${d.fieldDefinitions.length} field(s)`,
+          ),
+        } as const;
+      }
+
+      // An entries CSV does not name its own type; the merchant picks the
+      // target definition, which also prevents importing into the wrong one
+      // by accident.
+      const type = String(formData.get("type") ?? "");
+      if (!type) {
+        return {
+          step: "error",
+          message: "Choose which metaobject type these entries belong to.",
+        } as const;
+      }
+
+      const definition = await getDefinition(admin, type);
+      if (!definition) {
+        return {
+          step: "error",
+          message: `This store has no metaobject definition of type "${type}".`,
+        } as const;
+      }
+
+      const existing = await getEntries(admin, type);
+      return {
+        step: "plan",
+        plan: planEntryImport(definition, records, existing),
+        csv,
+        type,
+      } as const;
+    }
+
+    // --- Step 2: write ----------------------------------------------------
+    if (intent === "apply") {
+      const csv = String(formData.get("csv") ?? "");
+      const records = rowsToRecords(parseCsv(csv));
+      const failures: string[] = [];
+
+      if (String(formData.get("kind")) === "definition") {
+        let created = 0;
+        for (const definition of planDefinitionImport(records)) {
+          const result = await createDefinition(admin, definition);
+          if (result.ok) created++;
+          else failures.push(`${definition.type}: ${result.errors.join("; ")}`);
         }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-          metafields: [
-            {
-              namespace: "$app",
-              key: "demo_info",
-              value: "Created by React Router Template",
-            },
-          ],
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
+        return { step: "applied", created, updated: 0, failures } as const;
+      }
 
-  const product = responseJson.data!.productCreate!.product!;
-  const variantId = product.variants.edges[0]!.node!.id!;
+      const type = String(formData.get("type") ?? "");
+      const definition = await getDefinition(admin, type);
+      if (!definition) {
+        return {
+          step: "error",
+          message: `This store has no metaobject definition of type "${type}".`,
+        } as const;
+      }
 
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
+      // Re-plan against the store as it is *now* rather than trusting the plan
+      // the browser is echoing back: the data may have changed since it was
+      // shown, and it arrived from the client where it could have been edited.
+      const plan = planEntryImport(
+        definition,
+        records,
+        await getEntries(admin, type),
+      );
+
+      let created = 0;
+      let updated = 0;
+
+      // Sequential on purpose. These mutations share a leaky-bucket rate limit,
+      // and a burst of parallel writes gets throttled into failures that look
+      // like data errors.
+      for (const row of plan.rows) {
+        if (row.action === "unchanged") continue;
+        if (row.action === "error") {
+          failures.push(`Row ${row.rowNumber}: ${row.message}`);
+          continue;
+        }
+
+        const result = await upsertEntry(admin, type, row.handle, row.values);
+        if (!result.ok) {
+          failures.push(
+            `Row ${row.rowNumber} (${row.handle}): ${result.errors.join("; ")}`,
+          );
+        } else if (row.action === "create") {
+          created++;
+        } else {
+          updated++;
         }
       }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
 
-  const variantResponseJson = await variantResponse.json();
+      return { step: "applied", created, updated, failures } as const;
+    }
 
-  const metaobjectResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpsertMetaobject($handle: MetaobjectHandleInput!, $values: JSON!) {
-      metaobjectUpsert(handle: $handle, values: $values) {
-        metaobject {
-          id
-          handle
-          values
-        }
-        userErrors {
-          field
-          message
-        }
-      }
-    }`,
-    {
-      variables: {
-        handle: {
-          type: "$app:example",
-          handle: "demo-entry",
-        },
-        values: {
-          title: "Demo Entry",
-          description:
-            "This metaobject was created by the Shopify app template to demonstrate the metaobject API.",
-        },
-      },
-    },
-  );
-
-  const metaobjectResponseJson = await metaobjectResponse.json();
-
-  return {
-    product: responseJson!.data!.productCreate!.product,
-    variant:
-      variantResponseJson!.data!.productVariantsBulkUpdate!.productVariants,
-    metaobject: metaobjectResponseJson!.data!.metaobjectUpsert!.metaobject,
-  };
+    return { step: "error", message: "Unknown action." } as const;
+  } catch (error) {
+    // Parse failures and Admin API errors both land here. The message is the
+    // useful part — it names the row or the field that broke.
+    return {
+      step: "error",
+      message: error instanceof Error ? error.message : String(error),
+    } as const;
+  }
 };
 
-export default function Index() {
-  const fetcher = useFetcher<typeof action>();
+export default function ImportExportPage() {
+  const { definitions } = useLoaderData<typeof loader>();
+  const fetcher = useFetcher<ActionData>();
 
-  const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+  // Which definition the export links point at, and the default target for an
+  // entries import.
+  const [selectedType, setSelectedType] = useState(
+    definitions[0]?.type ?? "",
+  );
 
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
-    }
-  }, [fetcher.data?.product?.id, shopify]);
-
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+  const data = fetcher.data;
+  const busy = fetcher.state !== "idle";
+  const selected = definitions.find((d) => d.type === selectedType);
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
-      </s-button>
+    <s-page heading="Metaobjects import & export">
+      <s-section heading="Export">
+        {definitions.length === 0 ? (
+          <s-paragraph>
+            This store has no metaobject definitions yet. Import a definition
+            CSV below to create one.
+          </s-paragraph>
+        ) : (
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Pick a metaobject type, then download either its{" "}
+              <strong>entries</strong> (the data, one row per entry) or its{" "}
+              <strong>definition</strong> (the schema — import that into another
+              store first so the entries have somewhere to land).
+            </s-paragraph>
 
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references. Includes a product{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metafields"
-            target="_blank"
-          >
-            metafield
-          </s-link>{" "}
-          and{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data/metaobjects"
-            target="_blank"
-          >
-            metaobject
-          </s-link>
-          .
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
+            <s-select
+              label="Metaobject type"
+              name="exportType"
+              value={selectedType}
+              onChange={(e: Event) =>
+                setSelectedType((e.target as HTMLSelectElement).value)
+              }
             >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre
-                  style={{
-                    margin: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
+              {definitions.map((definition) => (
+                <s-option key={definition.id} value={definition.type}>
+                  {definition.name} ({definition.type}) — {definition.entryCount}{" "}
+                  entries
+                </s-option>
+              ))}
+            </s-select>
 
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre
-                  style={{
-                    margin: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
+            {selected && (
+              <s-paragraph>
+                <s-text>
+                  {selected.fieldKeys.length} field(s):{" "}
+                  {selected.fieldKeys.join(", ")}
+                </s-text>
+              </s-paragraph>
+            )}
 
-              <s-heading>metaobjectUpsert mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
+            {/* Plain links, not fetchers: the browser needs a real navigation
+                to trigger a file download. */}
+            <s-stack direction="inline" gap="base">
+              <s-button
+                href={`/app/export?type=${encodeURIComponent(selectedType)}&kind=entries`}
+                variant="primary"
               >
-                <pre
-                  style={{
-                    margin: 0,
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  <code>
-                    {JSON.stringify(fetcher.data.metaobject, null, 2)}
-                  </code>
-                </pre>
-              </s-box>
+                Download entries CSV
+              </s-button>
+              <s-button
+                href={`/app/export?type=${encodeURIComponent(selectedType)}&kind=definition`}
+              >
+                Download definition CSV
+              </s-button>
             </s-stack>
-          </s-section>
+          </s-stack>
         )}
       </s-section>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Custom data: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/apps/build/custom-data"
-            target="_blank"
-          >
-            Metafields &amp; metaobjects
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
+      <s-section heading="Import">
+        <fetcher.Form method="post" encType="multipart/form-data">
+          <input type="hidden" name="intent" value="plan" />
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              An <strong>entries</strong> CSV needs a <s-text>handle</s-text>{" "}
+              column plus one column per field. Rows are matched by handle: a
+              known handle is updated, a new one creates a metaobject. A{" "}
+              <strong>definition</strong> CSV is detected automatically and
+              creates the schema instead.
+            </s-paragraph>
+
+            <s-select
+              label="Import entries into"
+              name="type"
+              value={selectedType}
+              onChange={(e: Event) =>
+                setSelectedType((e.target as HTMLSelectElement).value)
+              }
+            >
+              {definitions.map((definition) => (
+                <s-option key={definition.id} value={definition.type}>
+                  {definition.name} ({definition.type})
+                </s-option>
+              ))}
+            </s-select>
+
+            <input type="file" name="file" accept=".csv,text/csv" required />
+
+            <s-button type="submit" {...(busy ? { loading: true } : {})}>
+              Review changes
+            </s-button>
+          </s-stack>
+        </fetcher.Form>
       </s-section>
 
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
-      </s-section>
+      {data?.step === "error" && (
+        <s-section heading="Could not read that file">
+          <s-banner tone="critical">
+            <s-paragraph>{data.message}</s-paragraph>
+          </s-banner>
+        </s-section>
+      )}
+
+      {data?.step === "plan" && (
+        <s-section heading="Review — nothing has been written yet">
+          <s-stack direction="block" gap="base">
+            <s-stack direction="inline" gap="small-300">
+              <s-badge tone="success">
+                {data.plan.counts.create} to create
+              </s-badge>
+              <s-badge tone="info">{data.plan.counts.update} to update</s-badge>
+              <s-badge tone="neutral">
+                {data.plan.counts.unchanged} unchanged
+              </s-badge>
+              {data.plan.counts.error > 0 && (
+                <s-badge tone="critical">
+                  {data.plan.counts.error} with errors
+                </s-badge>
+              )}
+            </s-stack>
+
+            {data.plan.unknownColumns.length > 0 && (
+              <s-banner tone="warning">
+                <s-paragraph>
+                  Ignored column(s) with no matching field:{" "}
+                  {data.plan.unknownColumns.join(", ")}
+                </s-paragraph>
+              </s-banner>
+            )}
+
+            {data.plan.missingRequiredColumns.length > 0 && (
+              <s-banner tone="warning">
+                <s-paragraph>
+                  The definition requires field(s) this file has no column for:{" "}
+                  {data.plan.missingRequiredColumns.join(", ")}. New entries
+                  will fail unless you add them.
+                </s-paragraph>
+              </s-banner>
+            )}
+
+            <s-table>
+              <s-table-header-row>
+                <s-table-header>Row</s-table-header>
+                <s-table-header>Handle</s-table-header>
+                <s-table-header>Action</s-table-header>
+                <s-table-header>Details</s-table-header>
+              </s-table-header-row>
+              <s-table-body>
+                {data.plan.rows.slice(0, 100).map((row) => (
+                  <s-table-row key={row.rowNumber}>
+                    <s-table-cell>{row.rowNumber}</s-table-cell>
+                    <s-table-cell>{row.handle || "—"}</s-table-cell>
+                    <s-table-cell>
+                      <s-badge
+                        tone={
+                          row.action === "error"
+                            ? "critical"
+                            : row.action === "create"
+                              ? "success"
+                              : row.action === "update"
+                                ? "info"
+                                : "neutral"
+                        }
+                      >
+                        {row.action}
+                      </s-badge>
+                    </s-table-cell>
+                    <s-table-cell>
+                      {row.message ??
+                        (row.changedFields.length
+                          ? `changes: ${row.changedFields.join(", ")}`
+                          : "")}
+                    </s-table-cell>
+                  </s-table-row>
+                ))}
+              </s-table-body>
+            </s-table>
+
+            {data.plan.rows.length > 100 && (
+              <s-paragraph>
+                Showing the first 100 of {data.plan.rows.length} rows. All of
+                them will be imported.
+              </s-paragraph>
+            )}
+
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="apply" />
+              <input type="hidden" name="kind" value="entries" />
+              <input type="hidden" name="type" value={data.type} />
+              <input type="hidden" name="csv" value={data.csv} />
+              <s-button
+                type="submit"
+                variant="primary"
+                {...(busy ? { loading: true } : {})}
+              >
+                Import {data.plan.counts.create + data.plan.counts.update}{" "}
+                entries
+              </s-button>
+            </fetcher.Form>
+          </s-stack>
+        </s-section>
+      )}
+
+      {data?.step === "plan-definition" && (
+        <s-section heading="Review — definition CSV">
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              This file describes {data.summary.length} definition(s). Existing
+              types are not modified — creating one that already exists reports
+              an error rather than overwriting it.
+            </s-paragraph>
+            <s-unordered-list>
+              {data.summary.map((line) => (
+                <s-list-item key={line}>{line}</s-list-item>
+              ))}
+            </s-unordered-list>
+
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="apply" />
+              <input type="hidden" name="kind" value="definition" />
+              <input type="hidden" name="csv" value={data.csv} />
+              <s-button
+                type="submit"
+                variant="primary"
+                {...(busy ? { loading: true } : {})}
+              >
+                Create definition(s)
+              </s-button>
+            </fetcher.Form>
+          </s-stack>
+        </s-section>
+      )}
+
+      {data?.step === "applied" && (
+        <s-section heading="Import finished">
+          <s-stack direction="block" gap="base">
+            <s-banner tone={data.failures.length ? "warning" : "success"}>
+              <s-paragraph>
+                {data.created} created, {data.updated} updated,{" "}
+                {data.failures.length} failed.
+              </s-paragraph>
+            </s-banner>
+
+            {data.failures.length > 0 && (
+              <s-unordered-list>
+                {data.failures.map((failure) => (
+                  <s-list-item key={failure}>{failure}</s-list-item>
+                ))}
+              </s-unordered-list>
+            )}
+          </s-stack>
+        </s-section>
+      )}
     </s-page>
   );
 }
-
-export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
-};
