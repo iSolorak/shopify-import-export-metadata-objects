@@ -97,18 +97,22 @@ sudo cp deploy/nginx/shopify-app.conf /etc/nginx/sites-available/shopify-app.con
 sudo ln -s /etc/nginx/sites-available/shopify-app.conf /etc/nginx/sites-enabled/
 ```
 
-Edit the copy in `/etc/nginx/`: replace `app.example.com` with your domain in
-both server blocks, and change the `upstream` port if you set a non-default
-`APP_PORT`.
+Edit the copy in `/etc/nginx/`: replace `app.example.com` with your domain, and
+change the `upstream` port if you set a non-default `APP_PORT`.
 
-Easiest path: comment out the port 443 block, apply the port 80 block, then let
-certbot fill in the TLS config.
+The shipped config is HTTP only and names no certificate files, so it validates
+before any certificate exists. Apply it, then let certbot add TLS — it copies
+the server block to port 443, fills in the certificate paths, and turns port 80
+into a redirect.
 
 ```sh
 sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d app.example.com
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+Optionally add HSTS to the port 443 block certbot generated:
+`add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`
 
 Then confirm from outside: `curl -sI https://app.example.com/healthz`.
 
