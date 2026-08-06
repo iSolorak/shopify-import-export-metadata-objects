@@ -13,7 +13,7 @@ internet ──443──> host nginx ──127.0.0.1:3000──> app container �
 ## What you need
 
 - A VPS with Docker Engine and the Compose plugin, plus nginx and certbot on the host.
-- A DNS A/AAAA record pointing your subdomain (e.g. `app.example.com`) at the VPS.
+- A DNS A/AAAA record pointing your subdomain (e.g. `shopify-app.solorak.xyz`) at the VPS.
 - A Shopify Partner account with this app created.
 
 ## 1. Get the code onto the server
@@ -54,8 +54,8 @@ always lands on the volume regardless of what `.env` says.
 In the Partner dashboard (or in `shopify.app.toml`, then `npm run deploy` from
 your workstation), set:
 
-- **App URL**: `https://app.example.com`
-- **Allowed redirection URL**: `https://app.example.com/api/auth`
+- **App URL**: `https://shopify-app.solorak.xyz`
+- **Allowed redirection URL**: `https://shopify-app.solorak.xyz/api/auth`
 
 These must match `SHOPIFY_APP_URL` exactly, or OAuth fails with a redirect_uri
 mismatch.
@@ -93,12 +93,13 @@ shows up as a 503 rather than a healthy container serving errors.
 ## 5. Set up nginx and TLS
 
 ```sh
-sudo cp deploy/nginx/shopify-app.conf /etc/nginx/sites-available/shopify-app.conf
-sudo ln -s /etc/nginx/sites-available/shopify-app.conf /etc/nginx/sites-enabled/
+sudo cp deploy/nginx/shopify-app.conf /etc/nginx/conf.d/shopify-app.conf
 ```
 
-Edit the copy in `/etc/nginx/`: replace `app.example.com` with your domain, and
-change the `upstream` port if you set a non-default `APP_PORT`.
+`conf.d` is included by the stock `nginx.conf` on every distro, so there is no
+symlink to create. Edit the copy in `/etc/nginx/conf.d/` only if you set a
+non-default `APP_PORT` — the `server_name` is already set to
+`shopify-app.solorak.xyz`.
 
 The shipped config is HTTP only and names no certificate files, so it validates
 before any certificate exists. Apply it, then let certbot add TLS — it copies
@@ -107,14 +108,35 @@ into a redirect.
 
 ```sh
 sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d app.example.com
+```
+
+Before running certbot, confirm the domain reaches **this** server block. If you
+get nginx's "Welcome to nginx!" page, the request is falling through to the
+default site and the ACME challenge will 404 with `unauthorized`:
+
+```sh
+curl -s http://shopify-app.solorak.xyz/ | head -3
+```
+
+On Debian/Ubuntu the fix is to drop the default site, which claims port 80 as
+the fallback for unmatched hostnames:
+
+```sh
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Once that check passes, issue the certificate:
+
+```sh
+sudo certbot --nginx -d shopify-app.solorak.xyz
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
 Optionally add HSTS to the port 443 block certbot generated:
 `add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`
 
-Then confirm from outside: `curl -sI https://app.example.com/healthz`.
+Then confirm from outside: `curl -sI https://shopify-app.solorak.xyz/healthz`.
 
 Two details in that config are load-bearing:
 
@@ -130,7 +152,7 @@ only, so port 3000 is not reachable from the internet.
 
 ## 6. Install on a store
 
-Open `https://app.example.com/auth/login` (or install from the Partner
+Open `https://shopify-app.solorak.xyz/auth/login` (or install from the Partner
 dashboard) and enter the shop domain. OAuth writes a row to the `Session`
 table; from then on the app is reachable inside the shop's admin.
 
