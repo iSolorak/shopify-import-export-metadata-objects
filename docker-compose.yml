@@ -7,7 +7,7 @@
 #   cp .env.example .env          # fill in the Shopify keys and SHOPIFY_APP_URL
 #   docker compose up -d --build
 #
-# Host nginx config to copy: deploy/nginx/shopify-app.conf
+# Host nginx + TLS setup: sudo ./deploy/setup-tls.sh (see DEPLOYMENT.md step 5)
 
 services:
   app:

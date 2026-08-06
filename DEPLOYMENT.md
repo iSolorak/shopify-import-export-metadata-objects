@@ -12,7 +12,9 @@ internet ──443──> host nginx ──127.0.0.1:3000──> app container �
 
 ## What you need
 
-- A VPS with Docker Engine and the Compose plugin, plus nginx and certbot on the host.
+- A VPS with Docker Engine and the Compose plugin, plus nginx and certbot on the
+  host. Plain `certbot` is enough — the webroot plugin used here is built in, and
+  `python3-certbot-nginx` is not needed.
 - A DNS A/AAAA record pointing your subdomain (e.g. `shopify-app.solorak.xyz`) at the VPS.
 - A Shopify Partner account with this app created.
 
@@ -92,51 +94,86 @@ shows up as a 503 rather than a healthy container serving errors.
 
 ## 5. Set up nginx and TLS
 
-```sh
-sudo cp deploy/nginx/shopify-app.conf /etc/nginx/conf.d/shopify-app.conf
-```
-
-`conf.d` is included by the stock `nginx.conf` on every distro, so there is no
-symlink to create. Edit the copy in `/etc/nginx/conf.d/` only if you set a
-non-default `APP_PORT` — the `server_name` is already set to
-`shopify-app.solorak.xyz`.
-
-The shipped config is HTTP only and names no certificate files, so it validates
-before any certificate exists. Apply it, then let certbot add TLS — it copies
-the server block to port 443, fills in the certificate paths, and turns port 80
-into a redirect.
+One command, run from the repo checkout on the server:
 
 ```sh
-sudo nginx -t && sudo systemctl reload nginx
+sudo EMAIL=you@example.com ./deploy/setup-tls.sh
 ```
 
-Before running certbot, confirm the domain reaches **this** server block. If you
-get nginx's "Welcome to nginx!" page, the request is falling through to the
-default site and the ACME challenge will 404 with `unauthorized`:
+It is idempotent — re-run it as often as you like. It:
+
+1. finds the directory your `nginx.conf` actually includes (`conf.d` or
+   `sites-available`/`sites-enabled`) and installs the HTTP-only config there,
+   substituting the domain and your `APP_PORT` from `.env`;
+2. reloads nginx and confirms via `nginx -T` that a server block for the domain
+   is genuinely loaded — not merely that the file exists;
+3. writes a test token into `/var/www/certbot/.well-known/acme-challenge/` and
+   fetches it back over the public URL;
+4. only if that succeeds, obtains the certificate with `certbot --webroot`;
+5. installs the TLS config and verifies the certificate served on 443 is the
+   right one, that `http://` redirects, and that `/healthz` answers over HTTPS.
+
+Step 3 is the important one. Let's Encrypt allows **5 failed validations per
+hostname per hour**, so a preventable failure locks you out of retrying for an
+hour. The pre-flight reproduces the exact request the CA will make, and aborts
+without contacting them if it does not come back correctly.
+
+Set `DOMAIN=` if you are not using `shopify-app.solorak.xyz`. Set `STAGING=1`
+to rehearse against Let's Encrypt's staging CA, which has no meaningful rate
+limits — useful if you have already burned attempts.
+
+### Check the A record actually points at this VPS
 
 ```sh
-curl -s http://shopify-app.solorak.xyz/ | head -3
+getent hosts shopify-app.solorak.xyz   # must be this server's public IP
+curl -s https://api.ipify.org; echo    # run on the server
 ```
 
-On Debian/Ubuntu the fix is to drop the default site, which claims port 80 as
-the fallback for unmatched hostnames:
+The `unauthorized ... 404` failure that prompted this section was caused by the
+A record pointing at `217.182.106.143` while the VPS is `217.182.206.143` — one
+digit apart, and the wrong address happened to be another OVH customer's box
+also running nginx. Everything looked correctly configured locally, because it
+was; the CA was simply talking to a different machine. Certbot's error message
+names the IP it contacted (`Detail: <ip>: Invalid response from ...`) — always
+compare that against your server's real address before touching nginx.
 
-```sh
-sudo rm /etc/nginx/sites-enabled/default
-sudo nginx -t && sudo systemctl reload nginx
+The installer performs this comparison and refuses to spend a validation
+attempt when it fails.
+
+### Why the old `certbot --nginx` path failed here
+
+`--nginx` has to locate the server block serving the hostname and patch it
+temporarily. On a VPS with other vhosts, if the request instead falls through
+to a default server — the "Welcome to nginx!" page — the plugin patches
+nothing and the CA gets a 404:
+
+```
+Type: unauthorized
+Detail: Invalid response from http://.../.well-known/acme-challenge/...: 404
 ```
 
-Once that check passes, issue the certificate:
+That means "port 80 for this hostname is not being served by the block you
+think it is", never a problem with the certificate request itself. Confirm
+which it is with `curl -s http://<domain>/ | head -3`: the nginx welcome page
+means the site config is not loaded (wrong directory, nginx never reloaded, or
+another block claims the name first). On Debian/Ubuntu, `sudo rm
+/etc/nginx/sites-enabled/default` removes the usual culprit.
 
-```sh
-sudo certbot --nginx -d shopify-app.solorak.xyz
-sudo nginx -t && sudo systemctl reload nginx
-```
+The webroot plugin sidesteps all of it: it only writes files into a directory
+this repo's config serves permanently, and never edits nginx config. That also
+means the installed config is yours to edit — renewals will not rewrite it.
 
-Optionally add HSTS to the port 443 block certbot generated:
-`add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;`
+### The two config stages
 
-Then confirm from outside: `curl -sI https://shopify-app.solorak.xyz/healthz`.
+`deploy/nginx/shopify-app.conf` (HTTP only) is installed first so nginx
+validates before any certificate exists; `deploy/nginx/shopify-app-tls.conf`
+replaces it afterwards, at the same path, so the `upstream` block is never
+duplicated. Both keep `/.well-known/acme-challenge/` above the redirect, so
+renewal does not depend on the certificate being renewed.
+
+Renewal runs from certbot's own systemd timer and reloads nginx through the
+deploy hook the installer registers. Rehearse it with `sudo certbot renew
+--dry-run`.
 
 Two details in that config are load-bearing:
 
@@ -144,8 +181,10 @@ Two details in that config are load-bearing:
   redirect URLs and Shopify rejects the callback.
 - **No** `X-Frame-Options` or `frame-ancestors` CSP. The app renders in an
   iframe inside the Shopify admin and the Shopify library already sends the
-  correct per-shop header. If your global `nginx.conf` sets `X-Frame-Options`,
-  uncomment the `proxy_hide_header` line, or the embedded app renders blank.
+  correct per-shop header. Both configs carry `proxy_hide_header
+  X-Frame-Options` so that a header set globally in a shared `nginx.conf` — very
+  likely on a box already hosting other sites — cannot leak through and make
+  the embedded app render blank.
 
 Only ports 80 and 443 need to be open. The container publishes to `127.0.0.1`
 only, so port 3000 is not reachable from the internet.
