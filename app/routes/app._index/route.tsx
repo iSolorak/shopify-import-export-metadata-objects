@@ -2,21 +2,22 @@ import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 
-import { authenticate } from "../shopify.server";
-import { parseCsv, rowsToRecords } from "../lib/csv";
+import { authenticate } from "../../shopify.server";
+import { parseCsv, rowsToRecords } from "../../lib/csv";
 import {
   createDefinition,
   getDefinition,
   getEntries,
   listDefinitions,
   upsertEntry,
-} from "../lib/metaobjects.server";
+} from "../../lib/metaobjects.server";
 import {
   isDefinitionCsv,
   planDefinitionImport,
   planEntryImport,
   type ImportPlan,
-} from "../lib/metaobject-csv";
+} from "../../lib/metaobject-csv";
+import styles from "./styles.module.css";
 
 // The app's only page: export metaobjects to CSV, and import a CSV back to
 // create or update them.
@@ -185,19 +186,77 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 };
 
+// The filename the server picked, so a download does not have to guess it.
+function filenameFrom(contentDisposition: string | null) {
+  const match = contentDisposition?.match(/filename="?([^";]+)"?/);
+  return match?.[1];
+}
+
+// Exports cannot be plain links. A link inside the embedded app is a
+// client-side navigation, and /app/export is a resource route with no
+// component — React Router would render an empty page instead of downloading.
+// Fetching the CSV and handing the browser a blob keeps us on this page.
+async function downloadCsv(url: string) {
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(
+      (await response.text()) || `Export failed with status ${response.status}`,
+    );
+  }
+
+  // A session that expired mid-visit answers with an auth redirect rather than
+  // a file. Saving that HTML as a .csv would be a confusing way to find out.
+  if (!response.headers.get("Content-Type")?.includes("text/csv")) {
+    throw new Error("Session expired. Reload the app and try again.");
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = objectUrl;
+  link.download =
+    filenameFrom(response.headers.get("Content-Disposition")) ?? "export.csv";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  // Revoking straight away cancels the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+}
+
 export default function ImportExportPage() {
   const { definitions } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
 
-  // Which definition the export links point at, and the default target for an
-  // entries import.
+  // Which definition the export buttons point at, and the default target for
+  // an entries import.
   const [selectedType, setSelectedType] = useState(
     definitions[0]?.type ?? "",
   );
+  const [exporting, setExporting] = useState<"entries" | "definition" | null>(
+    null,
+  );
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
   const selected = definitions.find((d) => d.type === selectedType);
+
+  const runExport = async (kind: "entries" | "definition") => {
+    setExporting(kind);
+    setExportError(null);
+    try {
+      await downloadCsv(
+        `/app/export?type=${encodeURIComponent(selectedType)}&kind=${kind}`,
+      );
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExporting(null);
+    }
+  };
 
   return (
     <s-page heading="Metaobjects import & export">
@@ -241,21 +300,29 @@ export default function ImportExportPage() {
               </s-paragraph>
             )}
 
-            {/* Plain links, not fetchers: the browser needs a real navigation
-                to trigger a file download. */}
-            <s-stack direction="inline" gap="base">
+            {exportError && (
+              <s-banner tone="critical">
+                <s-paragraph>{exportError}</s-paragraph>
+              </s-banner>
+            )}
+
+            <div className={styles.actions}>
               <s-button
-                href={`/app/export?type=${encodeURIComponent(selectedType)}&kind=entries`}
                 variant="primary"
+                onClick={() => runExport("entries")}
+                {...(exporting === "entries" ? { loading: true } : {})}
+                {...(exporting ? { disabled: true } : {})}
               >
                 Download entries CSV
               </s-button>
               <s-button
-                href={`/app/export?type=${encodeURIComponent(selectedType)}&kind=definition`}
+                onClick={() => runExport("definition")}
+                {...(exporting === "definition" ? { loading: true } : {})}
+                {...(exporting ? { disabled: true } : {})}
               >
                 Download definition CSV
               </s-button>
-            </s-stack>
+            </div>
           </s-stack>
         )}
       </s-section>
@@ -287,11 +354,22 @@ export default function ImportExportPage() {
               ))}
             </s-select>
 
-            <input type="file" name="file" accept=".csv,text/csv" required />
+            <label className={styles.fileField}>
+              <span className={styles.fileLabel}>CSV file</span>
+              <input
+                className={styles.fileInput}
+                type="file"
+                name="file"
+                accept=".csv,text/csv"
+                required
+              />
+            </label>
 
-            <s-button type="submit" {...(busy ? { loading: true } : {})}>
-              Review changes
-            </s-button>
+            <div className={styles.actions}>
+              <s-button type="submit" {...(busy ? { loading: true } : {})}>
+                Review changes
+              </s-button>
+            </div>
           </s-stack>
         </fetcher.Form>
       </s-section>
@@ -341,43 +419,47 @@ export default function ImportExportPage() {
               </s-banner>
             )}
 
-            <s-table>
-              <s-table-header-row>
-                <s-table-header>Row</s-table-header>
-                <s-table-header>Handle</s-table-header>
-                <s-table-header>Action</s-table-header>
-                <s-table-header>Details</s-table-header>
-              </s-table-header-row>
-              <s-table-body>
-                {data.plan.rows.slice(0, 100).map((row) => (
-                  <s-table-row key={row.rowNumber}>
-                    <s-table-cell>{row.rowNumber}</s-table-cell>
-                    <s-table-cell>{row.handle || "—"}</s-table-cell>
-                    <s-table-cell>
-                      <s-badge
-                        tone={
-                          row.action === "error"
-                            ? "critical"
-                            : row.action === "create"
-                              ? "success"
-                              : row.action === "update"
-                                ? "info"
-                                : "neutral"
-                        }
-                      >
-                        {row.action}
-                      </s-badge>
-                    </s-table-cell>
-                    <s-table-cell>
-                      {row.message ??
-                        (row.changedFields.length
-                          ? `changes: ${row.changedFields.join(", ")}`
-                          : "")}
-                    </s-table-cell>
-                  </s-table-row>
-                ))}
-              </s-table-body>
-            </s-table>
+            {/* A wide plan table would otherwise push the whole embedded page
+                sideways on a narrow screen. */}
+            <div className={styles.tableScroll}>
+              <s-table>
+                <s-table-header-row>
+                  <s-table-header>Row</s-table-header>
+                  <s-table-header>Handle</s-table-header>
+                  <s-table-header>Action</s-table-header>
+                  <s-table-header>Details</s-table-header>
+                </s-table-header-row>
+                <s-table-body>
+                  {data.plan.rows.slice(0, 100).map((row) => (
+                    <s-table-row key={row.rowNumber}>
+                      <s-table-cell>{row.rowNumber}</s-table-cell>
+                      <s-table-cell>{row.handle || "—"}</s-table-cell>
+                      <s-table-cell>
+                        <s-badge
+                          tone={
+                            row.action === "error"
+                              ? "critical"
+                              : row.action === "create"
+                                ? "success"
+                                : row.action === "update"
+                                  ? "info"
+                                  : "neutral"
+                          }
+                        >
+                          {row.action}
+                        </s-badge>
+                      </s-table-cell>
+                      <s-table-cell>
+                        {row.message ??
+                          (row.changedFields.length
+                            ? `changes: ${row.changedFields.join(", ")}`
+                            : "")}
+                      </s-table-cell>
+                    </s-table-row>
+                  ))}
+                </s-table-body>
+              </s-table>
+            </div>
 
             {data.plan.rows.length > 100 && (
               <s-paragraph>
@@ -391,14 +473,16 @@ export default function ImportExportPage() {
               <input type="hidden" name="kind" value="entries" />
               <input type="hidden" name="type" value={data.type} />
               <input type="hidden" name="csv" value={data.csv} />
-              <s-button
-                type="submit"
-                variant="primary"
-                {...(busy ? { loading: true } : {})}
-              >
-                Import {data.plan.counts.create + data.plan.counts.update}{" "}
-                entries
-              </s-button>
+              <div className={styles.actions}>
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  {...(busy ? { loading: true } : {})}
+                >
+                  Import {data.plan.counts.create + data.plan.counts.update}{" "}
+                  entries
+                </s-button>
+              </div>
             </fetcher.Form>
           </s-stack>
         </s-section>
@@ -422,13 +506,15 @@ export default function ImportExportPage() {
               <input type="hidden" name="intent" value="apply" />
               <input type="hidden" name="kind" value="definition" />
               <input type="hidden" name="csv" value={data.csv} />
-              <s-button
-                type="submit"
-                variant="primary"
-                {...(busy ? { loading: true } : {})}
-              >
-                Create definition(s)
-              </s-button>
+              <div className={styles.actions}>
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  {...(busy ? { loading: true } : {})}
+                >
+                  Create definition(s)
+                </s-button>
+              </div>
             </fetcher.Form>
           </s-stack>
         </s-section>

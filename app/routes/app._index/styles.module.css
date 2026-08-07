@@ -1,0 +1,94 @@
+/* Polaris web components style themselves inside shadow DOM, so this file only
+   covers the light-DOM wrappers around them: the button rows, the native file
+   input, and the scroll container for the plan table. */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.actions > * {
+  flex: 0 1 auto;
+}
+
+/* Side by side is cramped below roughly a phone's width; let each button take
+   the full row instead of shrinking the labels to two lines. */
+@media (max-width: 30rem) {
+  .actions {
+    gap: 0.5rem;
+  }
+
+  .actions > * {
+    flex: 1 1 100%;
+  }
+}
+
+.fileField {
+  display: block;
+}
+
+.fileLabel {
+  display: block;
+  margin-bottom: 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.fileInput {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.75rem;
+  border: 1px dashed #8a8a8a;
+  border-radius: 0.5rem;
+  background: #fbfbfb;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.fileInput::file-selector-button {
+  margin-right: 0.75rem;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid #8a8a8a;
+  border-radius: 0.375rem;
+  background: #fff;
+  font: inherit;
+  font-weight: 500;
+  color: inherit;
+  cursor: pointer;
+}
+
+.fileInput:hover {
+  border-color: #616161;
+}
+
+.fileInput:focus-visible {
+  outline: 2px solid #005bd3;
+  outline-offset: 1px;
+}
+
+.tableScroll {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The admin follows the operating system's theme. */
+@media (prefers-color-scheme: dark) {
+  .fileInput {
+    border-color: #616161;
+    background: #1a1a1a;
+  }
+
+  .fileInput::file-selector-button {
+    border-color: #616161;
+    background: #303030;
+  }
+
+  .fileInput:hover {
+    border-color: #8a8a8a;
+  }
+}
