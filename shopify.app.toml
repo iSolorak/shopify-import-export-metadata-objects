@@ -1,6 +1,6 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "f473d08af81d77c491bcc80633174559"
+client_id = "0035a3a7a4b32139c1b552815c23f537"
 name = "Metaobject-Import-Export"
 application_url = "https://shopify-app.solorak.xyz"
 embedded = true
