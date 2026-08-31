@@ -1,5 +1,5 @@
 {
-  "name": "developing-testing",
+  "name": "metaobject-import-export",
   "private": true,
   "scripts": {
     "build": "react-router build",
