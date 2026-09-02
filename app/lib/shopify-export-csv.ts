@@ -14,6 +14,12 @@
 // This module normalises such a file into the same records the app's own export
 // produces, so everything downstream — the planner, the diff, the writes — stays
 // unaware there are two input formats.
+//
+// Collapsing per-variant rows is applied to *every* format, not just Shopify's.
+// Any tool that walks variants emits one row per variant with the product-level
+// fields on exactly one of them, and which row that is varies: Shopify uses the
+// first, other exporters the last. Merging on the first non-empty value per
+// column is the only rule correct for both.
 
 import { rowsToRecords } from "./csv";
 import { HANDLE_COLUMN, TITLE_COLUMN } from "./rich-text-csv";
@@ -36,12 +42,30 @@ const METAFIELD_COLUMN = /^.*?\(product\.metafields\.([^.)]+)\.([^)]+)\)$/;
 /**
  * Does this look like a file exported from Products → Export?
  *
- * Keyed on the capitalised column names, which is what distinguishes it from
- * this app's own export. Case matters: `title` is ours, `Title` is Shopify's.
+ * Keyed on the presence of a `(product.metafields.…)` column, which is the one
+ * unambiguous signature of that format and the only thing here that warrants
+ * discarding columns.
+ *
+ * Deliberately *not* keyed on capitalised `Handle`/`Title`. A file that has been
+ * through a spreadsheet often arrives with one renamed and the other not, and a
+ * check requiring both matches neither path — which is precisely how a
+ * half-edited export slipped through as an unrecognised format.
  */
 export function isShopifyProductExport(headers: string[]): boolean {
-  const trimmed = headers.map((header) => header.trim());
-  return trimmed.includes(SHOPIFY_HANDLE) && trimmed.includes(SHOPIFY_TITLE);
+  return headers.some((header) => METAFIELD_COLUMN.test(header.trim()));
+}
+
+/**
+ * The planner's name for an identifying column, or null if it is not one.
+ *
+ * Case-insensitive: `Handle` and `handle` mean the same thing, and which one a
+ * given file uses says nothing useful about it.
+ */
+function identifyingColumn(header: string): string | null {
+  const lower = header.trim().toLowerCase();
+  if (lower === SHOPIFY_HANDLE.toLowerCase()) return HANDLE_COLUMN;
+  if (lower === SHOPIFY_TITLE.toLowerCase()) return TITLE_COLUMN;
+  return null;
 }
 
 export type NormalizedCsv = {
@@ -73,89 +97,136 @@ export function normalizeCsvRecords(
   knownColumns?: Iterable<string>,
 ): NormalizedCsv {
   const headers = (rows[0] ?? []).map((header) => header.trim());
-
-  if (!isShopifyProductExport(headers)) {
-    return { records: rowsToRecords(rows) };
-  }
-
   const known = knownColumns ? new Set(knownColumns) : null;
+  const isShopify = isShopifyProductExport(headers);
 
-  const records = rowsToRecords(rows);
+  let records = rowsToRecords(rows);
+  const parts: string[] = [];
 
-  // Map each source column to the name the planner expects, or to null to drop
-  // it. Built from the headers rather than per row so the work happens once.
-  const mapping = new Map<string, string>();
-  let metafieldColumns = 0;
+  // --- Rename and prune, for Shopify's format only -------------------------
+  //
+  // A file already using this app's column names is left alone: its unexpected
+  // columns are the merchant's own typos, and the planner reporting them is
+  // more useful than silently dropping them.
   let otherMetafieldColumns = 0;
 
-  for (const header of headers) {
-    if (header === SHOPIFY_HANDLE) {
-      mapping.set(header, HANDLE_COLUMN);
-      continue;
-    }
-    if (header === SHOPIFY_TITLE) {
-      mapping.set(header, TITLE_COLUMN);
-      continue;
+  if (isShopify) {
+    const mapping = new Map<string, string>();
+    const claimed = new Set<string>();
+    let richTextColumns = 0;
+
+    for (const header of headers) {
+      const identifying = identifyingColumn(header);
+      if (identifying) {
+        // A file carrying both `Title` and `title` would otherwise have one
+        // silently overwrite the other; first occurrence wins instead.
+        if (claimed.has(identifying)) continue;
+        claimed.add(identifying);
+        mapping.set(header, identifying);
+        continue;
+      }
+
+      const match = METAFIELD_COLUMN.exec(header);
+      if (!match) continue;
+
+      const column = `${match[1]}.${match[2]}`;
+      if (known && !known.has(column)) {
+        otherMetafieldColumns++;
+        continue;
+      }
+
+      mapping.set(header, column);
+      richTextColumns++;
     }
 
-    const match = METAFIELD_COLUMN.exec(header);
-    if (!match) continue;
+    records = records.map((record) => {
+      const mapped: Record<string, string> = {};
+      for (const [from, to] of mapping) mapped[to] = record[from] ?? "";
+      return mapped;
+    });
 
-    const column = `${match[1]}.${match[2]}`;
-    if (known && !known.has(column)) {
-      otherMetafieldColumns++;
-      continue;
+    parts.push(`Read as a Shopify product export`);
+    parts.push(`${richTextColumns} rich text column(s) found`);
+
+    const ignored = headers.length - mapping.size - otherMetafieldColumns;
+    if (ignored > 0) parts.push(`${ignored} product column(s) ignored`);
+    if (otherMetafieldColumns > 0) {
+      parts.push(`${otherMetafieldColumns} non-rich-text metafield(s) ignored`);
     }
+  } else {
+    // Not Shopify's format, so nothing is discarded — but the identifying
+    // columns are still normalised for case, so a file with `Handle` and
+    // `custom.highlight` groups the same as one with `handle`.
+    const renames = headers
+      .map((header) => [header, identifyingColumn(header)] as const)
+      .filter(
+        ([header, to]) => to !== null && header !== to,
+      ) as [string, string][];
 
-    mapping.set(header, column);
-    metafieldColumns++;
+    if (renames.length) {
+      records = records.map((record) => {
+        const next = { ...record };
+        for (const [from, to] of renames) {
+          if (next[to] === undefined) next[to] = next[from];
+          delete next[from];
+        }
+        return next;
+      });
+    }
   }
 
-  // Collapse to one row per product. Shopify writes the product-level fields on
-  // the first row of a handle and leaves them blank on the variant rows that
-  // follow, so the first occurrence is the one carrying the data.
+  // --- Collapse rows describing the same product ---------------------------
   //
-  // Grouped by handle rather than by "has a title", because a row whose title
-  // happens to be blank for another reason should still be reported as an error
-  // by the planner rather than silently swallowed here.
-  const byHandle = new Map<string, Record<string, string>>();
-  const anonymous: Record<string, string>[] = [];
-  let variantRows = 0;
+  // Applies to every format, because a per-variant export is not unique to
+  // Shopify's own: any tool that walks variants emits one row per variant with
+  // the product-level fields filled in on exactly one of them.
+  //
+  // Keyed on the handle, never the title. Two rows sharing a handle are the
+  // same product and can safely be merged; two rows merely sharing a title may
+  // be different products, and collapsing those would write one product's copy
+  // over another. That case stays an error from the planner.
+  const merged = new Map<string, Record<string, string>>();
+  const ungrouped: Record<string, string>[] = [];
+  let collapsed = 0;
 
   for (const record of records) {
-    const handle = (record[SHOPIFY_HANDLE] ?? "").trim();
+    const handle = (record[HANDLE_COLUMN] ?? "").trim();
 
-    const mapped: Record<string, string> = {};
-    for (const [from, to] of mapping) mapped[to] = record[from] ?? "";
-
-    // A row with no handle cannot be grouped; keep it so the planner can report
-    // it rather than dropping a row the merchant may have hand-added.
+    // No handle to group on: keep the row as-is so the planner can judge it.
     if (!handle) {
-      anonymous.push(mapped);
+      ungrouped.push(record);
       continue;
     }
 
-    if (byHandle.has(handle)) {
-      variantRows++;
+    const existing = merged.get(handle);
+    if (!existing) {
+      merged.set(handle, { ...record });
       continue;
     }
-    byHandle.set(handle, mapped);
+
+    // Merge rather than keeping whichever row came first. Shopify's export puts
+    // the product-level values on the first row of a handle; other exports put
+    // them on the last. Taking the first *non-empty* value per column is
+    // correct for both, where first-wins silently discards the real content
+    // whenever it is not on the leading row.
+    for (const [column, value] of Object.entries(record)) {
+      if (!existing[column]?.trim() && value.trim()) existing[column] = value;
+    }
+    collapsed++;
   }
 
-  const parts = [
-    `Read as a Shopify product export: ${byHandle.size + anonymous.length} product(s)`,
-  ];
-  if (variantRows) parts.push(`${variantRows} extra variant row(s) collapsed`);
-  parts.push(`${metafieldColumns} rich text column(s) found`);
+  if (collapsed === 0 && !isShopify) return { records };
 
-  const ignored = headers.length - mapping.size - otherMetafieldColumns;
-  if (ignored > 0) parts.push(`${ignored} product column(s) ignored`);
-  if (otherMetafieldColumns > 0) {
-    parts.push(`${otherMetafieldColumns} non-rich-text metafield(s) ignored`);
-  }
+  // The format label leads, then what was done to the rows, then what was
+  // dropped — so the sentence reads in the order a reader needs it.
+  const products = merged.size + ungrouped.length;
+  const count = collapsed
+    ? `${products} product(s) from ${records.length} rows, ${collapsed} duplicate row(s) merged`
+    : `${products} product(s)`;
+  parts.splice(isShopify ? 1 : 0, 0, count);
 
   return {
-    records: [...byHandle.values(), ...anonymous],
+    records: [...merged.values(), ...ungrouped],
     note: `${parts.join(", ")}.`,
   };
 }
