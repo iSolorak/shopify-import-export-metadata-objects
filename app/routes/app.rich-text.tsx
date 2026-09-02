@@ -3,7 +3,8 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 
 import { authenticate } from "../shopify.server";
-import { parseCsv, rowsToRecords } from "../lib/csv";
+import { parseCsv } from "../lib/csv";
+import { normalizeCsvRecords } from "../lib/shopify-export-csv";
 import {
   METAFIELD_BATCH_SIZE,
   getProductRichTextByTitles,
@@ -27,7 +28,7 @@ import styles from "./app._index/styles.module.css";
 // CSV text rides between them in a hidden field so confirming does not require
 // re-picking the file.
 type ActionData =
-  | { step: "plan"; plan: RichTextImportPlan; csv: string }
+  | { step: "plan"; plan: RichTextImportPlan; csv: string; note?: string }
   | { step: "applied"; updated: number; failures: string[] }
   | { step: "error"; message: string };
 
@@ -80,11 +81,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         } as const;
       }
 
-      const records = rowsToRecords(rows);
-      if (!rows[0].map((header) => header.trim()).includes(TITLE_COLUMN)) {
+      // Accepts this app's own export or a file straight out of the admin's
+      // Products → Export; see `shopify-export-csv.ts`.
+      const { records, note } = normalizeCsvRecords(
+        rows,
+        definitions.map((definition) => definition.column),
+      );
+      if (!records.some((record) => record[TITLE_COLUMN] !== undefined)) {
         return {
           step: "error",
-          message: `This file has no "${TITLE_COLUMN}" column. Rows are matched to products by title — download the template to see the expected columns.`,
+          message: `This file has no "${TITLE_COLUMN}" column. Rows are matched to products by title — download the template to see the expected columns, or import a Shopify product export unchanged.`,
         } as const;
       }
 
@@ -99,13 +105,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         step: "plan",
         plan: planRichTextImport(definitions, records, products),
         csv,
+        ...(note ? { note } : {}),
       } as const;
     }
 
     // --- Step 2: write ------------------------------------------------------
     if (intent === "apply") {
       const csv = String(formData.get("csv") ?? "");
-      const records = rowsToRecords(parseCsv(csv));
+      // Normalised the same way as in the plan step, so the re-plan below sees
+      // exactly the rows the merchant was shown.
+      const { records } = normalizeCsvRecords(
+        parseCsv(csv),
+        definitions.map((definition) => definition.column),
+      );
 
       // Re-plan against the store as it is *now* rather than trusting the plan
       // the browser is echoing back: the data may have changed since it was
@@ -281,6 +293,15 @@ export default function RichTextPage() {
             </s-paragraph>
 
             <s-paragraph>
+              A CSV exported from <strong>Products → Export</strong> in the
+              admin also works as-is — its{" "}
+              <s-text>Title</s-text> and{" "}
+              <s-text>… (product.metafields.namespace.key)</s-text> columns are
+              recognised, and its per-variant rows are collapsed to one row per
+              product.
+            </s-paragraph>
+
+            <s-paragraph>
               An <strong>empty cell is left alone</strong>, not cleared, so you
               can fill in one column without disturbing the others. Two products
               sharing a title need a <s-text>handle</s-text> column to tell them
@@ -318,6 +339,12 @@ export default function RichTextPage() {
       {data?.step === "plan" && (
         <s-section heading="Review — nothing has been written yet">
           <s-stack direction="block" gap="base">
+            {data.note && (
+              <s-banner tone="info">
+                <s-paragraph>{data.note}</s-paragraph>
+              </s-banner>
+            )}
+
             <s-stack direction="inline" gap="small-300">
               <s-badge tone="info">{data.plan.counts.update} to update</s-badge>
               <s-badge tone="neutral">
