@@ -74,19 +74,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           message: "That file has a header row but no data rows.",
         } as const;
       }
-      if (rows.length - 1 > MAX_ROWS) {
-        return {
-          step: "error",
-          message: `That file has ${rows.length - 1} rows. Import at most ${MAX_ROWS} at a time.`,
-        } as const;
-      }
-
       // Accepts this app's own export or a file straight out of the admin's
       // Products → Export; see `shopify-export-csv.ts`.
       const { records, note } = normalizeCsvRecords(
         rows,
         definitions.map((definition) => definition.column),
       );
+
+      // Counted after collapsing, not before. A Shopify export is one row per
+      // variant, so a modest catalogue easily runs to thousands of rows — the
+      // real 3261-row export behind this comment is only 479 products. The cost
+      // this cap exists to bound is one write per product, so rejecting on the
+      // raw row count would refuse files that are well within it.
+      if (records.length > MAX_ROWS) {
+        return {
+          step: "error",
+          message: `That file has ${records.length} products. Import at most ${MAX_ROWS} at a time.`,
+        } as const;
+      }
       if (!records.some((record) => record[TITLE_COLUMN] !== undefined)) {
         return {
           step: "error",
