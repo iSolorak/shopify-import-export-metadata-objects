@@ -204,13 +204,18 @@ export function normalizeCsvRecords(
       continue;
     }
 
-    // Merge rather than keeping whichever row came first. Shopify's export puts
-    // the product-level values on the first row of a handle; other exports put
-    // them on the last. Taking the first *non-empty* value per column is
-    // correct for both, where first-wins silently discards the real content
-    // whenever it is not on the leading row.
+    // Merge rather than keeping whichever row came first, and let a later
+    // non-empty value win. An empty cell never overwrites anything, so the
+    // hundreds of blank variant rows in a real export cannot erase the one row
+    // carrying the copy — which is what makes this safe regardless of whether
+    // the value sits on the first row (Shopify's own layout) or the last.
+    //
+    // Last-wins rather than first-wins is deliberate. Where a product really
+    // does have two filled rows, the later one is the corrected copy: in the
+    // export this was built against, every such conflict paired a generic
+    // placeholder early on with the product-specific text further down.
     for (const [column, value] of Object.entries(record)) {
-      if (!existing[column]?.trim() && value.trim()) existing[column] = value;
+      if (value.trim()) existing[column] = value;
     }
     collapsed++;
   }
