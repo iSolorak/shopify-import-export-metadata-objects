@@ -17,9 +17,9 @@ export default function App() {
 
   return (
     <AppProvider embedded apiKey={apiKey}>
-      {/* One section, so the nav carries a single entry back to it. */}
       <s-app-nav>
         <s-link href="/app">Import &amp; export</s-link>
+        <s-link href="/app/rich-text">Import &amp; export rich text</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
