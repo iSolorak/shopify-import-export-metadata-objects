@@ -208,28 +208,45 @@ export type ParsedSource = {
  */
 export function parseSource(rows: string[][]): ParsedSource {
   const columns = (rows[0] ?? []).map((header) => header.trim());
-  const records = collapseVariantRows(rowsToRecords(rows), columns);
+  const handleColumn = findColumn(columns, HANDLE_COLUMNS);
+  const titleColumn = findColumn(columns, ["title"]);
+  const records = collapseVariantRows(rowsToRecords(rows), columns, handleColumn);
 
   const byHandle = new Map<string, Record<string, string>>();
   const byTitle = new Map<string, Record<string, string>[]>();
 
   for (const record of records) {
-    const handle = normalizeKey(findValue(record, "handle"));
+    const handle = handleColumn
+      ? normalizeKey(record[handleColumn] ?? "")
+      : "";
     if (handle && !byHandle.has(handle)) byHandle.set(handle, record);
 
-    const title = normalizeKey(findValue(record, "title"));
+    const title = titleColumn ? normalizeKey(record[titleColumn] ?? "") : "";
     if (title) byTitle.set(title, [...(byTitle.get(title) ?? []), record]);
   }
 
   return { columns, records, byHandle, byTitle };
 }
 
-/** Look a column up ignoring case, so `Handle` and `handle` both resolve. */
-function findValue(record: Record<string, string>, name: string): string {
-  for (const [key, value] of Object.entries(record)) {
-    if (key.trim().toLowerCase() === name) return value;
+/**
+ * What a shop's export might call the URL handle.
+ *
+ * Shopify says `Handle`; other systems say `slug`, and one that does is also
+ * one row per variant. Without the alias its rows never group, every title
+ * turns up dozens of times, and the whole file is rejected as ambiguous — the
+ * safe answer to a question that was never really ambiguous.
+ */
+const HANDLE_COLUMNS = ["handle", "slug"];
+
+/** The first of `names` present in `columns`, ignoring case. */
+function findColumn(columns: string[], names: string[]): string | null {
+  for (const name of names) {
+    const match = columns.find(
+      (column) => column.trim().toLowerCase() === name,
+    );
+    if (match) return match;
   }
-  return "";
+  return null;
 }
 
 /**
@@ -241,16 +258,14 @@ function findValue(record: Record<string, string>, name: string): string {
  *
  * First non-empty value per column wins. Shopify puts the product-level fields
  * on the first row and other exporters on the last, and that rule is the only
- * one correct for both. Grouped on handle only — two rows sharing a handle are
- * certainly the same product, whereas two sharing a title may not be.
+ * one correct for both. Grouped on the handle only — two rows sharing a handle
+ * are certainly the same product, whereas two sharing a title may not be.
  */
 function collapseVariantRows(
   records: Record<string, string>[],
   columns: string[],
+  handleColumn: string | null,
 ): Record<string, string>[] {
-  const handleColumn = columns.find(
-    (column) => column.trim().toLowerCase() === "handle",
-  );
   if (!handleColumn) return records;
 
   const merged = new Map<string, Record<string, string>>();
