@@ -168,10 +168,10 @@ export type StagedTarget = {
 /**
  * Reserve an upload slot for one video.
  *
- * `httpMethod` is left at its default of PUT: the returned URL then takes the
- * raw bytes as the request body, which is far simpler than assembling the
- * multipart form a POST target expects. `fileSize` is not optional here — the
- * schema requires it whenever `resource` is VIDEO.
+ * A VIDEO resource always comes back as a Google Cloud Storage POST target,
+ * whatever `httpMethod` asks for, so the caller must send the bytes as a signed
+ * multipart form (see `uploadRemoteVideo`). `fileSize` is not optional here —
+ * the schema requires it whenever `resource` is VIDEO.
  *
  * Throws rather than returning user errors, because unlike a per-row data
  * problem there is nothing partial to report: without a target the row cannot

@@ -209,7 +209,7 @@ export async function probeRemoteVideo(
 }
 
 /**
- * Download the video and PUT it at the staged target.
+ * Download the video and POST it at the staged target.
  *
  * Throws on failure: unlike a GraphQL user error, there is no partial success
  * to report here — either the bytes arrived or the row cannot proceed.
@@ -240,19 +240,27 @@ export async function uploadRemoteVideo(
     );
   }
 
-  // Shopify returns the headers the signed URL expects; for a PUT target that
-  // is typically just Content-Type.
-  const headers = new Headers();
+  // A VIDEO target is always a Google Cloud Storage bucket that takes a signed
+  // multipart POST — `parameters` carries the credentials (GoogleAccessId,
+  // policy, signature, key, …) as *form fields*, not headers. Sending them as
+  // headers on a PUT leaves the request unsigned, and GCS answers 400
+  // MissingSecurityHeader. The file part must come last: GCS ignores any field
+  // that follows it.
+  const form = new FormData();
   for (const parameter of target.parameters) {
-    headers.set(parameter.name, parameter.value);
+    form.append(parameter.name, parameter.value);
   }
-  if (!headers.has("Content-Type")) headers.set("Content-Type", probe.mimeType);
-  headers.set("Content-Length", String(bytes.byteLength));
+  form.append(
+    "file",
+    new Blob([bytes], { type: probe.mimeType }),
+    probe.filename,
+  );
 
   const upload = await fetch(target.url, {
-    method: "PUT",
-    headers,
-    body: bytes,
+    method: "POST",
+    // No explicit headers: fetch has to set Content-Type itself so the
+    // multipart boundary matches the body it generates.
+    body: form,
     signal: AbortSignal.timeout(180_000),
   });
 
