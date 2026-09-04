@@ -21,6 +21,7 @@ export default function App() {
         <s-link href="/app">Import &amp; export</s-link>
         <s-link href="/app/rich-text">Import &amp; export rich text</s-link>
         <s-link href="/app/translations">Translation CSV builder</s-link>
+        <s-link href="/app/product-videos">Add product videos</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
