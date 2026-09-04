@@ -20,6 +20,7 @@ export default function App() {
       <s-app-nav>
         <s-link href="/app">Import &amp; export</s-link>
         <s-link href="/app/rich-text">Import &amp; export rich text</s-link>
+        <s-link href="/app/translations">Translation CSV builder</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>

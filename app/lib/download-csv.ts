@@ -11,6 +11,32 @@ function filenameFrom(contentDisposition: string | null) {
   return match?.[1];
 }
 
+/**
+ * Hand the browser a string to save as a file.
+ *
+ * Split out from `downloadCsv` for the pages that build their CSV from an
+ * upload rather than fetching it: the file only exists as the response to a
+ * POST carrying the source data, so there is no URL to point a download at.
+ */
+export function saveCsv(text: string, filename: string) {
+  // The BOM is what makes Excel read the file as UTF-8 rather than mangling
+  // every accented character, matching what the export routes send.
+  const blob = new Blob(["﻿" + text], {
+    type: "text/csv;charset=utf-8",
+  });
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  // Revoking straight away cancels the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+}
+
 export async function downloadCsv(url: string) {
   const response = await fetch(url);
 
