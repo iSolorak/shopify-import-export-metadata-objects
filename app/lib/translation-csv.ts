@@ -11,9 +11,10 @@
 // the translations export are known too, and filling in `Translated content` is
 // bookkeeping.
 //
-// Scope is deliberately the `PRODUCT` rows only. The export identifies a
-// metafield by bare metafield ID with no reference to the product carrying it,
-// so those rows cannot be joined from CSV alone and are left untouched.
+// Metafield rows are joined too, but not from CSV alone: the export identifies
+// them by bare metafield ID with no reference to the product carrying them, so
+// the caller resolves those IDs through the Admin API and hands the result in
+// as `metafieldRowsByProduct`.
 
 import { rowsToRecords, toCsv } from "./csv";
 import { cellToRichTextValue } from "./rich-text";
@@ -36,21 +37,23 @@ const TRANSLATED_COLUMN = "Translated content";
 const DEFAULT_COLUMN = "Default content";
 const ID_COLUMN = "Identification";
 const PRODUCT_TYPE = "PRODUCT";
+const METAFIELD_TYPE = "METAFIELD";
 
 /**
- * A field that can be written, and how a source cell has to be shaped first.
+ * A place a source column can be written to, and how the cell has to be shaped
+ * on the way in.
  *
- * `format` is the extension point. Every product field is plain today, but a
- * `rich_text_field` metafield stores JSON like
- * `{"type":"root","children":[…]}` rather than the text a normal export holds,
- * so anything pointed at one has to be converted. Keeping the distinction on
- * the target rather than at the call site means adding such a target later is
- * a line in this list, not a change to the writer.
+ * `format` matters because a `rich_text_field` metafield does not store text.
+ * It stores JSON — `{"type":"root","children":[{"type":"paragraph",…}]}` — and
+ * a normal shop export holds plain text or HTML, so anything aimed at one has
+ * to be converted or Shopify rejects the row.
  */
 export type TranslationTarget = {
+  /** `title` for a product field, `custom.usage` for a metafield. */
   field: string;
   label: string;
   format: "text" | "rich_text";
+  kind: "product" | "metafield";
 };
 
 /**
@@ -60,17 +63,28 @@ export type TranslationTarget = {
  * the translation as HTML too, so converting it would corrupt it.
  */
 export const PRODUCT_FIELDS: TranslationTarget[] = [
-  { field: "title", label: "Title", format: "text" },
-  { field: "body_html", label: "Description (body_html)", format: "text" },
-  { field: "handle", label: "Handle", format: "text" },
-  { field: "product_type", label: "Product type", format: "text" },
-  { field: "meta_title", label: "SEO title", format: "text" },
-  { field: "meta_description", label: "SEO description", format: "text" },
+  { field: "title", label: "Title", format: "text", kind: "product" },
+  {
+    field: "body_html",
+    label: "Description (body_html)",
+    format: "text",
+    kind: "product",
+  },
+  { field: "handle", label: "Handle", format: "text", kind: "product" },
+  {
+    field: "product_type",
+    label: "Product type",
+    format: "text",
+    kind: "product",
+  },
+  { field: "meta_title", label: "SEO title", format: "text", kind: "product" },
+  {
+    field: "meta_description",
+    label: "SEO description",
+    format: "text",
+    kind: "product",
+  },
 ];
-
-const TARGETS_BY_FIELD = new Map(
-  PRODUCT_FIELDS.map((target) => [target.field, target]),
-);
 
 /**
  * The join key, applied identically to both files.
@@ -97,6 +111,14 @@ export type ParsedTranslations = {
   products: TranslationProduct[];
   /** The distinct locales present, for display. */
   locales: string[];
+  /**
+   * Metafield ID to that metafield's row index.
+   *
+   * The export says nothing else about these rows — no product, no namespace,
+   * no key — so on their own they are unusable. `resolveMetafieldOwners` in
+   * `translation-metafields.server.ts` turns the IDs into products.
+   */
+  metafieldRows: Map<string, number>;
 };
 
 /**
@@ -121,11 +143,21 @@ export function parseTranslations(rows: string[][]): ParsedTranslations {
   const records = rowsToRecords(rows);
   const byId = new Map<string, TranslationProduct>();
   const locales = new Set<string>();
+  const metafieldRows = new Map<string, number>();
 
   records.forEach((record, index) => {
+    const rowId = record[ID_COLUMN]?.trim();
+
+    if (record[TYPE_COLUMN] === METAFIELD_TYPE) {
+      // Keyed on the metafield ID because that is genuinely all there is. The
+      // first row per ID wins, for the same multi-locale reason as below.
+      if (rowId && !metafieldRows.has(rowId)) metafieldRows.set(rowId, index);
+      return;
+    }
+
     if (record[TYPE_COLUMN] !== PRODUCT_TYPE) return;
 
-    const id = record[ID_COLUMN]?.trim();
+    const id = rowId;
     if (!id) return;
 
     const locale = record["Locale"]?.trim();
@@ -156,6 +188,7 @@ export function parseTranslations(rows: string[][]): ParsedTranslations {
     rows: records,
     products: [...byId.values()],
     locales: [...locales],
+    metafieldRows,
   };
 }
 
@@ -277,12 +310,29 @@ export function buildTranslationCsv({
   translations,
   source,
   mapping,
+  targets,
+  metafieldRowsByProduct,
 }: {
   translations: ParsedTranslations;
   source: ParsedSource;
   mapping: ColumnMapping;
+  /** Everything mappable: the product fields plus the store's metafields. */
+  targets: TranslationTarget[];
+  /**
+   * Product ID → `namespace.key` → row index, built from the API lookup.
+   * Absent when nothing metafield-shaped was mapped, since the caller then
+   * skips the lookup entirely.
+   */
+  metafieldRowsByProduct?: Map<string, Map<string, number>>;
 }): BuildResult {
-  const pairs = Object.entries(mapping).filter(([, field]) => field);
+  const byField = new Map(targets.map((target) => [target.field, target]));
+  const pairs = Object.entries(mapping)
+    .filter(([, field]) => field)
+    // A mapping naming a field this store does not have is dropped rather than
+    // written blindly: the form is re-posted from the client, and a stale one
+    // could otherwise aim at a metafield that has since been deleted.
+    .filter(([, field]) => byField.has(field));
+
   if (pairs.length === 0) {
     throw new Error("Choose at least one column to import before building.");
   }
@@ -313,13 +363,20 @@ export function buildTranslationCsv({
       // An empty cell means "no translation for this one", never "clear it".
       if (!cell.trim()) continue;
 
-      const rowIndex = product.rowsByField.get(field);
+      const target = byField.get(field)!;
+      // A product field is addressed by name; a metafield only through the
+      // product it was resolved onto.
+      const rowIndex =
+        target.kind === "metafield"
+          ? metafieldRowsByProduct?.get(product.id)?.get(field)
+          : product.rowsByField.get(field);
+
       if (rowIndex === undefined) {
-        missingFields.add(field);
+        missingFields.add(target.label);
         continue;
       }
 
-      writes.set(rowIndex, formatValue(cell, TARGETS_BY_FIELD.get(field)));
+      writes.set(rowIndex, formatValue(cell, target));
     }
   }
 
@@ -363,6 +420,12 @@ function matchSource(
   return byTitle[0];
 }
 
-function formatValue(cell: string, target: TranslationTarget | undefined) {
-  return target?.format === "rich_text" ? cellToRichTextValue(cell) : cell;
+/**
+ * Shape a source cell for the field it is going into.
+ *
+ * A `rich_text_field` gets the JSON document Shopify stores; anything else
+ * keeps the text exactly as the shop's export wrote it.
+ */
+function formatValue(cell: string, target: TranslationTarget) {
+  return target.format === "rich_text" ? cellToRichTextValue(cell) : cell;
 }

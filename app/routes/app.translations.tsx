@@ -10,7 +10,14 @@ import {
   parseSource,
   parseTranslations,
   type ColumnMapping,
+  type ParsedTranslations,
+  type TranslationTarget,
 } from "../lib/translation-csv";
+import {
+  RICH_TEXT_TYPE,
+  listProductMetafieldDefinitions,
+  resolveMetafieldOwners,
+} from "../lib/translation-metafields.server";
 import { saveCsv } from "../lib/download-csv";
 import styles from "./app._index/styles.module.css";
 
@@ -39,6 +46,8 @@ type ActionData =
       unmatched: string[];
       ambiguous: string[];
       missingFields: string[];
+      /** Metafield rows the store could not account for, if any were mapped. */
+      unresolvedMetafields: number;
     } & Counts)
   | { step: "error"; message: string };
 
@@ -49,9 +58,12 @@ type ActionData =
 type Counts = {
   columns: string[];
   mapping: ColumnMapping;
+  /** Product fields plus this store's metafields, for the dropdown. */
+  targets: TranslationTarget[];
   productCount: number;
   sourceCount: number;
   locales: string[];
+  metafieldRowCount: number;
 };
 
 /** Column names worth pre-selecting, keyed by the field they obviously feed. */
@@ -64,20 +76,99 @@ const SUGGESTED: Record<string, string> = {
   type: "product_type",
 };
 
-function suggestMapping(columns: string[]): ColumnMapping {
+/**
+ * A metafield column in a Shopify-shaped export, e.g.
+ * `Usage (product.metafields.custom.usage)`.
+ *
+ * The namespace cannot contain a dot so it is matched non-greedily up to the
+ * first one; the key takes the rest. Namespaces are gnarlier than they look —
+ * `shopify--discovery--product_recommendation` is one Shopify emits itself.
+ */
+const METAFIELD_COLUMN = /^.*?\(product\.metafields\.([^.)]+)\.([^)]+)\)$/;
+
+/**
+ * Pre-fill the obvious pairs, so the common case is a glance rather than
+ * forty dropdowns.
+ *
+ * A source export that already labels its metafield columns the Shopify way
+ * names its own destination, so those map straight across when the store has a
+ * metafield of the same `namespace.key`. Everything else is left unmapped for
+ * the user to decide.
+ */
+function suggestMapping(
+  columns: string[],
+  targets: TranslationTarget[],
+): ColumnMapping {
+  const known = new Set(targets.map((target) => target.field));
   const mapping: ColumnMapping = {};
   const taken = new Set<string>();
 
   for (const column of columns) {
-    const field = SUGGESTED[column.trim().toLowerCase()];
+    const trimmed = column.trim();
+    const metafield = METAFIELD_COLUMN.exec(trimmed);
+    const field = metafield
+      ? `${metafield[1]}.${metafield[2]}`
+      : SUGGESTED[trimmed.toLowerCase()];
+
     // One field per column and one column per field: a file with both
     // `Body (HTML)` and `Body HTML` would otherwise silently pick the last.
-    if (!field || taken.has(field)) continue;
+    if (!field || taken.has(field) || !known.has(field)) continue;
     taken.add(field);
     mapping[column] = field;
   }
 
   return mapping;
+}
+
+/**
+ * Turn the store's metafield definitions into mappable targets.
+ *
+ * The type matters: a `rich_text_field` needs its value converted to Shopify's
+ * JSON document shape, which is what `format` carries downstream.
+ */
+function metafieldTargets(
+  definitions: { column: string; name: string; type: string }[],
+): TranslationTarget[] {
+  return definitions.map((definition) => ({
+    field: definition.column,
+    label: `${definition.name} (${definition.column})`,
+    format: definition.type === RICH_TEXT_TYPE ? "rich_text" : "text",
+    kind: "metafield",
+  }));
+}
+
+/**
+ * Which products own which metafield rows, for the fields actually mapped.
+ *
+ * The lookup is the only Admin API call this feature makes per product, so it
+ * is skipped outright unless a metafield was mapped — a run touching nothing
+ * but title and description costs nothing extra.
+ */
+async function resolveMetafieldRows(
+  admin: Parameters<typeof resolveMetafieldOwners>[0],
+  translations: ParsedTranslations,
+) {
+  const owners = await resolveMetafieldOwners(admin, [
+    ...translations.metafieldRows.keys(),
+  ]);
+
+  const byProduct = new Map<string, Map<string, number>>();
+  for (const [metafieldId, rowIndex] of translations.metafieldRows) {
+    const owner = owners.get(metafieldId);
+    if (!owner) continue;
+
+    let columns = byProduct.get(owner.productId);
+    if (!columns) {
+      columns = new Map();
+      byProduct.set(owner.productId, columns);
+    }
+    columns.set(owner.column, rowIndex);
+  }
+
+  return {
+    byProduct,
+    unresolved: translations.metafieldRows.size - owners.size,
+  };
 }
 
 function readMapping(formData: FormData): ColumnMapping {
@@ -107,7 +198,7 @@ async function readUpload(formData: FormData, name: string, label: string) {
 }
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
   try {
     const formData = await request.formData();
@@ -127,13 +218,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } as const;
     }
 
+    // One cheap paged query. It populates the dropdown, and its types decide
+    // which targets need rich text conversion.
+    const targets = [
+      ...PRODUCT_FIELDS,
+      ...metafieldTargets(await listProductMetafieldDefinitions(admin)),
+    ];
+
     // Both files read; a submit with no mapping is the first pass, whose only
-    // job is to report the columns available to map.
+    // job is to report what can be mapped where.
     const counts = {
       columns: source.columns,
+      targets,
       productCount: translations.products.length,
       sourceCount: source.records.length,
       locales: translations.locales,
+      metafieldRowCount: translations.metafieldRows.size,
     };
 
     const mapping = readMapping(formData);
@@ -141,15 +241,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return {
         step: "inspect",
         ...counts,
-        mapping: suggestMapping(source.columns),
+        mapping: suggestMapping(source.columns, targets),
       } as const;
     }
+
+    // The ID → product lookup is the expensive step, so it only runs when
+    // something is actually aimed at a metafield.
+    const byField = new Map(targets.map((target) => [target.field, target]));
+    const usesMetafields = Object.values(mapping).some(
+      (field) => byField.get(field)?.kind === "metafield",
+    );
+    const resolved = usesMetafields
+      ? await resolveMetafieldRows(admin, translations)
+      : null;
 
     return {
       step: "built",
       ...counts,
       mapping,
-      ...buildTranslationCsv({ translations, source, mapping }),
+      unresolvedMetafields: resolved?.unresolved ?? 0,
+      ...buildTranslationCsv({
+        translations,
+        source,
+        mapping,
+        targets,
+        ...(resolved ? { metafieldRowsByProduct: resolved.byProduct } : {}),
+      }),
     } as const;
   } catch (error) {
     return {
@@ -198,11 +315,17 @@ export default function TranslationsPage() {
             </s-paragraph>
 
             <s-paragraph>
-              Only product fields are filled in — title, description, handle,
-              product type and the two SEO fields. Metafield rows are left
-              alone: the export identifies them by metafield ID with no
-              reference to the product they belong to, so they cannot be matched
-              from these two files.
+              Product fields — title, description, handle, product type and the
+              two SEO fields — plus this store&rsquo;s product metafields.
+              Metafield rows carry only a metafield ID, so the product they
+              belong to is looked up from the store when you map one.
+            </s-paragraph>
+
+            <s-paragraph>
+              A metafield of type <s-text>rich_text_field</s-text> is converted
+              to the JSON document Shopify stores, so plain text or HTML from
+              your export imports cleanly. Those targets are marked{" "}
+              <s-text>rich text</s-text> in the list.
             </s-paragraph>
 
             <s-paragraph>
@@ -257,6 +380,11 @@ export default function TranslationsPage() {
                 <s-badge tone="neutral">
                   {data.sourceCount} products in your export
                 </s-badge>
+                {data.metafieldRowCount > 0 && (
+                  <s-badge tone="neutral">
+                    {data.metafieldRowCount} metafield rows
+                  </s-badge>
+                )}
                 {data.locales.length === 1 && (
                   <s-badge tone="neutral">{data.locales[0]}</s-badge>
                 )}
@@ -309,7 +437,7 @@ export default function TranslationsPage() {
                             >
                               Don&rsquo;t import
                             </s-option>
-                            {PRODUCT_FIELDS.map((target) => (
+                            {data.targets.map((target) => (
                               <s-option
                                 key={target.field}
                                 value={target.field}
@@ -317,7 +445,12 @@ export default function TranslationsPage() {
                                   ? { defaultSelected: true }
                                   : {})}
                               >
-                                {target.label}
+                                {target.kind === "metafield"
+                                  ? `Metafield — ${target.label}`
+                                  : target.label}
+                                {target.format === "rich_text"
+                                  ? " · rich text"
+                                  : ""}
                               </s-option>
                             ))}
                           </s-select>
@@ -373,13 +506,26 @@ export default function TranslationsPage() {
               </div>
             )}
 
+            {data.unresolvedMetafields > 0 && (
+              <s-banner tone="warning">
+                <s-paragraph>
+                  {data.unresolvedMetafields} metafield row(s) in the export
+                  could not be traced to a product on this store. That is
+                  expected for metafields deleted since the export was taken —
+                  but if it covers nearly all of them, the translations file
+                  probably came from a different store than the one this app is
+                  installed on.
+                </s-paragraph>
+              </s-banner>
+            )}
+
             {data.missingFields.length > 0 && (
               <s-banner tone="warning">
                 <s-paragraph>
-                  The translations export has no rows for:{" "}
+                  Nothing was written for:{" "}
                   {data.missingFields.join(", ")}. Shopify only lists a field
-                  once the product has content in it, so nothing was written
-                  there.
+                  in the export once the product already has content in it, so
+                  there was no row to fill.
                 </s-paragraph>
               </s-banner>
             )}
