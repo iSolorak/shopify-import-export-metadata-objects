@@ -21,6 +21,14 @@ export type RichTextDefinition = {
   namespace: string;
   key: string;
   name: string;
+  /**
+   * The metafield's type, e.g. `rich_text_field` or `list.metaobject_reference`.
+   *
+   * Always `rich_text_field` for the rich text feature, which filters on it, so
+   * nothing there reads this. The product update importer does: it decides how
+   * a CSV cell is converted before it is written.
+   */
+  type: string;
   /** `namespace.key` — how a metafield is addressed, and the CSV column name. */
   column: string;
 };
@@ -80,8 +88,11 @@ function formatUserErrors(userErrors: UserError[]): string[] {
 // ---------------------------------------------------------------------------
 
 const DEFINITIONS = `#graphql
-  query ProductRichTextDefinitions($cursor: String) {
-    metafieldDefinitions(ownerType: PRODUCT, first: 250, after: $cursor) {
+  query ProductRichTextDefinitions(
+    $cursor: String
+    $ownerType: MetafieldOwnerType!
+  ) {
+    metafieldDefinitions(ownerType: $ownerType, first: 250, after: $cursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
         id
@@ -107,15 +118,25 @@ type DefinitionsResponse = {
   };
 };
 
+/** A metafield owner this app writes to. */
+export type MetafieldOwner = "PRODUCT" | "PRODUCTVARIANT";
+
 /**
- * Every rich text metafield defined on products.
+ * Every metafield defined on an owner, optionally narrowed to one type.
  *
  * Only defined metafields are listed. A value can technically be written to an
  * undefined namespace/key, but it would be invisible in the admin, so offering
  * that would mostly be a way to lose data.
+ *
+ * The `type` carried on each definition is what tells a writer how to convert a
+ * CSV cell — `rich_text_field` needs Shopify's JSON document shape, a
+ * `metaobject_reference` needs a gid rather than the handle a merchant typed.
+ * The rich text feature ignores it because it has already filtered to one type.
  */
-export async function listRichTextDefinitions(
+export async function listMetafieldDefinitions(
   admin: Admin,
+  ownerType: MetafieldOwner,
+  options?: { type?: string },
 ): Promise<RichTextDefinition[]> {
   const definitions: RichTextDefinition[] = [];
   let cursor: string | null = null;
@@ -124,17 +145,18 @@ export async function listRichTextDefinitions(
     const data: DefinitionsResponse = await query<DefinitionsResponse>(
       admin,
       DEFINITIONS,
-      { cursor },
+      { cursor, ownerType },
     );
     const connection = data.metafieldDefinitions;
 
     for (const node of connection.nodes) {
-      if (node.type.name !== RICH_TEXT_TYPE) continue;
+      if (options?.type && node.type.name !== options.type) continue;
       definitions.push({
         id: node.id,
         namespace: node.namespace,
         key: node.key,
         name: node.name,
+        type: node.type.name,
         column: `${node.namespace}.${node.key}`,
       });
     }
@@ -145,6 +167,18 @@ export async function listRichTextDefinitions(
   } while (cursor);
 
   return definitions.sort((a, b) => a.column.localeCompare(b.column));
+}
+
+/**
+ * Every rich text metafield defined on products.
+ *
+ * The original, narrower entry point, kept so the rich text import/export and
+ * the translation builder read no differently than before.
+ */
+export function listRichTextDefinitions(
+  admin: Admin,
+): Promise<RichTextDefinition[]> {
+  return listMetafieldDefinitions(admin, "PRODUCT", { type: RICH_TEXT_TYPE });
 }
 
 // ---------------------------------------------------------------------------

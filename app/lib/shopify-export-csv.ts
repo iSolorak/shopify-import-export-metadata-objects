@@ -36,8 +36,14 @@ const SHOPIFY_TITLE = "Title";
  * first one; the key takes the rest. Real namespaces are gnarlier than they
  * look — `shopify--discovery--product_recommendation` is one Shopify itself
  * emits — so nothing here assumes a tidy identifier.
+ *
+ * Exported so the product update importer can reuse it rather than adding a
+ * third copy of the same regex. That importer also reads
+ * `(variant.metafields.…)` columns, which this one has no use for, so it keeps
+ * the owner prefix as a capture of its own.
  */
-const METAFIELD_COLUMN = /^.*?\(product\.metafields\.([^.)]+)\.([^)]+)\)$/;
+export const METAFIELD_COLUMN =
+  /^.*?\((product|variant)\.metafields\.([^.)]+)\.([^)]+)\)$/;
 
 /**
  * Does this look like a file exported from Products → Export?
@@ -129,7 +135,16 @@ export function normalizeCsvRecords(
       const match = METAFIELD_COLUMN.exec(header);
       if (!match) continue;
 
-      const column = `${match[1]}.${match[2]}`;
+      // Product metafields only. A `(variant.metafields.…)` column addresses a
+      // different owner entirely, and mapping it to a bare `namespace.key`
+      // would collide with the product metafield of the same name — so it is
+      // counted as dropped alongside the irrelevant product ones.
+      if (match[1] !== "product") {
+        otherMetafieldColumns++;
+        continue;
+      }
+
+      const column = `${match[2]}.${match[3]}`;
       if (known && !known.has(column)) {
         otherMetafieldColumns++;
         continue;
