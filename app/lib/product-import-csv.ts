@@ -675,9 +675,20 @@ function planVariant(
             "false";
 
         if (!variant.tracked && !turningOn) {
-          errors.push(
-            `Row ${row.rowNumber} sets a quantity but inventory is not tracked for this variant. Set a Variant Inventory Tracker column, or turn tracking on in the admin.`,
-          );
+          // Shopify's own export writes `Variant Inventory Qty 0` for every
+          // variant, tracked or not, and leaves `Variant Inventory Tracker`
+          // blank for the untracked ones. Reading that filler as an
+          // instruction turned a straight round-trip of an unedited export
+          // into one error per variant and left the file with nothing to do.
+          //
+          // A zero on an untracked variant carries no information, so it is
+          // skipped like any other cell that would change nothing. A real
+          // quantity is a request that cannot be honoured, and still reports.
+          if (quantity !== 0) {
+            errors.push(
+              `Row ${row.rowNumber} sets a quantity of ${quantity} but inventory is not tracked for this variant. Set a Variant Inventory Tracker column, or turn tracking on in the admin.`,
+            );
+          }
           break;
         }
         const current = variant.quantities.get(context.locationId);
