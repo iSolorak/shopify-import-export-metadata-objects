@@ -37,6 +37,7 @@ import {
   type ShopLocation,
 } from "../lib/product-write.server";
 import { listMetafieldDefinitions } from "../lib/product-metafields.server";
+import { listDefinitions } from "../lib/metaobjects.server";
 import styles from "./app._index/styles.module.css";
 
 // Update products from a CSV without deleting and recreating them.
@@ -263,7 +264,21 @@ async function buildPlan(
   }
 
   // --- Resolve the names that need ids ------------------------------------
-  const metaobjects = await resolveMetaobjectRefs(admin, grouped.rows, resolved);
+  // Metaobject definition gid → type, so a reference column restricted to one
+  // definition can resolve the bare handles Shopify's export writes. Only
+  // fetched when the file actually maps such a column.
+  const metaobjectTypes = await metaobjectTypesById(admin, resolved);
+  const defaultTypeFor = (target: FieldTarget): string | undefined =>
+    target.metafield?.metaobjectDefinitionId
+      ? metaobjectTypes.get(target.metafield.metaobjectDefinitionId)
+      : undefined;
+
+  const metaobjects = await resolveMetaobjectRefs(
+    admin,
+    grouped.rows,
+    resolved,
+    defaultTypeFor,
+  );
   const categories = await resolveCategories(admin, grouped.rows);
 
   const context: PlanContext = {
@@ -272,8 +287,13 @@ async function buildPlan(
     locationId: locationId || null,
     metaobjects,
     categories,
-    toMetafieldValue: (type, cell, ctx) =>
-      toMetafieldValue(type, cell, ctx.metaobjects),
+    toMetafieldValue: (target, cell, ctx) =>
+      toMetafieldValue(
+        target.metafield!.type,
+        cell,
+        ctx.metaobjects,
+        defaultTypeFor(target),
+      ),
   };
 
   return {
@@ -299,28 +319,53 @@ async function resolveMetaobjectRefs(
   admin: Admin,
   rows: ProductRow[],
   resolved: ReturnType<typeof resolveHeaders>,
+  defaultTypeFor: (target: FieldTarget) => string | undefined,
 ): Promise<Map<string, string>> {
-  const metaobjectFields = new Set<string>();
+  // Keyed by field so a cell can be parsed with the same default type the
+  // planner will use for it — otherwise a bare handle would be gathered here
+  // and looked up under a different key than the one the converter asks for.
+  const metaobjectFields = new Map<string, FieldTarget>();
   for (const target of resolved.byColumn.values()) {
     if (target.metafield && METAOBJECT_TYPES.includes(target.metafield.type)) {
-      metaobjectFields.add(target.field);
+      metaobjectFields.set(target.field, target);
     }
   }
   if (!metaobjectFields.size) return new Map();
 
   const refs: { type: string; handle: string }[] = [];
+  const collect = (values: Map<string, string>) => {
+    for (const [field, value] of values) {
+      const target = metaobjectFields.get(field);
+      if (target) refs.push(...metaobjectRefsIn(value, defaultTypeFor(target)));
+    }
+  };
+
   for (const row of rows) {
-    for (const [field, value] of row.values) {
-      if (metaobjectFields.has(field)) refs.push(...metaobjectRefsIn(value));
-    }
-    for (const variant of row.variants) {
-      for (const [field, value] of variant.values) {
-        if (metaobjectFields.has(field)) refs.push(...metaobjectRefsIn(value));
-      }
-    }
+    collect(row.values);
+    for (const variant of row.variants) collect(variant.values);
   }
 
   return refs.length ? resolveMetaobjectHandles(admin, refs) : new Map();
+}
+
+/**
+ * Metaobject definition gid → its type, for the reference columns in this file.
+ *
+ * Skipped entirely when nothing maps to a metaobject reference, which is the
+ * common case; the definition list is a paged query and not worth running for
+ * a price sheet.
+ */
+async function metaobjectTypesById(
+  admin: Admin,
+  resolved: ReturnType<typeof resolveHeaders>,
+): Promise<Map<string, string>> {
+  const needed = [...resolved.byColumn.values()].some(
+    (target) => target.metafield?.metaobjectDefinitionId,
+  );
+  if (!needed) return new Map();
+
+  const definitions = await listDefinitions(admin);
+  return new Map(definitions.map((definition) => [definition.id, definition.type]));
 }
 
 /** Resolve the distinct category names the file uses to taxonomy ids. */

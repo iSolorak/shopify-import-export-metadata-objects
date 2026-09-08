@@ -31,6 +31,18 @@ export type RichTextDefinition = {
   type: string;
   /** `namespace.key` — how a metafield is addressed, and the CSV column name. */
   column: string;
+  /**
+   * For a `metaobject_reference` / `list.metaobject_reference`, the gid of the
+   * single metaobject definition its entries must come from.
+   *
+   * Shopify's product export writes these cells as bare handles — the
+   * `shopify.color-pattern` column comes out as
+   * `01-ivory-radiant;02-neutral-radiant` — with no type prefix, because the
+   * definition already fixes the type. Carrying it here is what lets a bare
+   * handle be resolved instead of rejected. Absent for `mixed_reference`,
+   * which may point at several definitions and so genuinely needs the prefix.
+   */
+  metaobjectDefinitionId?: string;
 };
 
 export type ProductRichText = {
@@ -100,6 +112,7 @@ const DEFINITIONS = `#graphql
         namespace
         key
         type { name }
+        validations { name value }
       }
     }
   }
@@ -114,9 +127,27 @@ type DefinitionsResponse = {
       namespace: string;
       key: string;
       type: { name: string };
+      validations: { name: string; value: string | null }[];
     }[];
   };
 };
+
+/**
+ * The metaobject definition a reference metafield is restricted to, if any.
+ *
+ * Shopify records it as a `metaobject_definition_id` validation on the
+ * definition rather than in the type string, which only ever says
+ * `metaobject_reference`.
+ */
+function metaobjectDefinitionIdOf(
+  validations: { name: string; value: string | null }[],
+): string | null {
+  return (
+    validations.find(
+      (validation) => validation.name === "metaobject_definition_id",
+    )?.value ?? null
+  );
+}
 
 /** A metafield owner this app writes to. */
 export type MetafieldOwner = "PRODUCT" | "PRODUCTVARIANT";
@@ -158,6 +189,9 @@ export async function listMetafieldDefinitions(
         name: node.name,
         type: node.type.name,
         column: `${node.namespace}.${node.key}`,
+        ...(metaobjectDefinitionIdOf(node.validations)
+          ? { metaobjectDefinitionId: metaobjectDefinitionIdOf(node.validations)! }
+          : {}),
       });
     }
 

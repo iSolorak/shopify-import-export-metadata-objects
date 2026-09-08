@@ -34,7 +34,14 @@ export type FieldTarget = {
   label: string;
   scope: FieldScope;
   /** Set for metafield targets; drives value conversion and the owner. */
-  metafield?: { namespace: string; key: string; type: string; owner: "PRODUCT" | "PRODUCTVARIANT" };
+  metafield?: {
+    namespace: string;
+    key: string;
+    type: string;
+    owner: "PRODUCT" | "PRODUCTVARIANT";
+    /** Lets a bare metaobject handle in the cell be resolved without a prefix. */
+    metaobjectDefinitionId?: string;
+  };
   /** 1-3 for the option columns, so option name and value pair up. */
   optionIndex?: number;
 };
@@ -279,6 +286,9 @@ export function metafieldTargets(
       key: definition.key,
       type: definition.type,
       owner,
+      ...(definition.metaobjectDefinitionId
+        ? { metaobjectDefinitionId: definition.metaobjectDefinitionId }
+        : {}),
     },
   }));
 }

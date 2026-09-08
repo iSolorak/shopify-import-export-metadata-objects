@@ -279,9 +279,15 @@ export type PlanContext = {
   metaobjects: Map<string, string>;
   /** Category search term → taxonomy gid. */
   categories: Map<string, string>;
-  /** Metafield value converter, injected so this module stays HTML-agnostic. */
+  /**
+   * Metafield value converter, injected so this module stays HTML-agnostic.
+   *
+   * Takes the whole target rather than just the type: a metaobject reference
+   * column also needs the definition it is restricted to, which is what lets a
+   * bare handle resolve.
+   */
   toMetafieldValue: (
-    type: string,
+    target: FieldTarget,
     cell: string,
     context: PlanContext,
   ) => { ok: true; value: string } | { ok: false; message: string };
@@ -846,11 +852,7 @@ export function planProductUpdate(
       const target = metafieldTargets.get(field);
       if (!target?.metafield || target.metafield.owner !== "PRODUCT") continue;
 
-      const converted = context.toMetafieldValue(
-        target.metafield.type,
-        value,
-        context,
-      );
+      const converted = context.toMetafieldValue(target, value, context);
       if (!converted.ok) {
         errors.push(`${target.label}: ${converted.message}`);
         continue;
@@ -914,11 +916,7 @@ export function planProductUpdate(
           continue;
         }
 
-        const converted = context.toMetafieldValue(
-          target.metafield.type,
-          value,
-          context,
-        );
+        const converted = context.toMetafieldValue(target, value, context);
         if (!converted.ok) {
           errors.push(`Row ${variantRow.rowNumber} ${target.label}: ${converted.message}`);
           continue;

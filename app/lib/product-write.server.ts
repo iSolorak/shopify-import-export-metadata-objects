@@ -662,18 +662,30 @@ export const METAOBJECT_TYPES = [
  * Metaobject handles a file refers to, so they can be resolved in one pass
  * before planning rather than one query at a time inside it.
  *
- * The cell is `type:handle` — the type is required because a handle is only
- * unique within its definition, and the metafield's own definition does not
- * carry it in a form this code can read back.
+ * A cell is `type:handle`, or several separated by `;`. A handle is only unique
+ * within its definition, so the type has to come from somewhere — but it does
+ * not have to come from the cell. When the metafield definition is restricted
+ * to one metaobject definition, `defaultType` carries that type and a **bare
+ * handle** resolves against it.
+ *
+ * That is not a convenience: it is the format Shopify's own product export
+ * writes. A `shopify.color-pattern` column comes out as
+ * `01-ivory-radiant;02-neutral-radiant;…`, and requiring the prefix rejected
+ * every such column on a straight round-trip of an export.
  */
-export function metaobjectRefsIn(cell: string): { type: string; handle: string }[] {
+export function metaobjectRefsIn(
+  cell: string,
+  defaultType?: string,
+): { type: string; handle: string }[] {
   return cell
     .split(";")
     .map((part) => part.trim())
     .filter(Boolean)
     .map((part) => {
       const separator = part.indexOf(":");
-      if (separator === -1) return null;
+      if (separator === -1) {
+        return defaultType ? { type: defaultType, handle: part } : null;
+      }
       return {
         type: part.slice(0, separator).trim(),
         handle: part.slice(separator + 1).trim(),
@@ -692,6 +704,7 @@ export function toMetafieldValue(
   type: string,
   cell: string,
   metaobjects: Map<string, string>,
+  defaultMetaobjectType?: string,
 ): { ok: true; value: string } | { ok: false; message: string } {
   const trimmed = cell.trim();
 
@@ -707,11 +720,13 @@ export function toMetafieldValue(
   }
 
   if (METAOBJECT_TYPES.includes(type)) {
-    const refs = metaobjectRefsIn(trimmed);
+    const refs = metaobjectRefsIn(trimmed, defaultMetaobjectType);
     if (!refs.length) {
       return {
         ok: false,
-        message: `Expected "type:handle" (several separated by ";"), got "${trimmed}".`,
+        message: defaultMetaobjectType
+          ? `Expected one or more metaobject handles separated by ";", got "${trimmed}".`
+          : `Expected "type:handle" (several separated by ";"), got "${trimmed}". This metafield accepts more than one metaobject definition, so the type is required.`,
       };
     }
 
@@ -857,9 +872,16 @@ export async function updateVariants(
   return { ok: errors.length === 0, errors };
 }
 
+// `@idempotent` is optional as of 2026-01 and required as of 2026-04, and
+// `app/shopify.server.ts` pins 2026-07. A fresh key per call is right here:
+// each batch is a distinct operation, and the key exists so a network-level
+// retry of *that* call cannot double-apply it.
 const SET_INVENTORY = `#graphql
-  mutation SetInventoryQuantities($input: InventorySetQuantitiesInput!) {
-    inventorySetQuantities(input: $input) {
+  mutation SetInventoryQuantities(
+    $input: InventorySetQuantitiesInput!
+    $idempotencyKey: String!
+  ) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
       inventoryAdjustmentGroup { id }
       userErrors { field message code }
     }
@@ -869,11 +891,17 @@ const SET_INVENTORY = `#graphql
 /**
  * Set available quantities at one location.
  *
- * `changeFromQuantity` is deliberately omitted from each quantity, which is how
- * the API opts out of the compare-and-swap check. The plan was built against a
- * read taken moments earlier and the merchant has just approved it; failing the
- * whole batch because a single unit sold in between would be worse than
- * applying it.
+ * `changeFromQuantity` is the compare-and-swap check, and on this API version
+ * it is **mandatory to send** — "you must explicitly pass in a value, even if
+ * that value is null, or the mutation returns an error". Omitting it, which an
+ * earlier version of this file did in the belief that absence meant "skip the
+ * check", is what produced `InventoryQuantityInput must include the following
+ * argument: changeFromQuantity` on every product carrying a quantity.
+ *
+ * `null` is the documented way to skip the check, and skipping is right here:
+ * the plan was built against a read taken moments earlier and the merchant has
+ * just approved it, so failing a 200-product batch because one unit sold in
+ * between would be worse than applying it.
  */
 export async function setInventoryQuantities(
   admin: Admin,
@@ -891,6 +919,7 @@ export async function setInventoryQuantities(
     const data = await query<{
       inventorySetQuantities: { userErrors: UserError[] };
     }>(admin, SET_INVENTORY, {
+      idempotencyKey: crypto.randomUUID(),
       input: {
         name: "available",
         reason: "correction",
@@ -898,6 +927,7 @@ export async function setInventoryQuantities(
           inventoryItemId: entry.inventoryItemId,
           locationId,
           quantity: entry.quantity,
+          changeFromQuantity: null,
         })),
       },
     });
