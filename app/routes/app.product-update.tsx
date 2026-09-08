@@ -1,4 +1,5 @@
 import { useRef } from "react";
+import type { FormEvent } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher } from "react-router";
 
@@ -45,14 +46,28 @@ import styles from "./app._index/styles.module.css";
 // translations, collection memberships. This page changes only the fields the
 // file actually names, on the product that is already there.
 //
-// Three steps, and which one is running is inferred from the form rather than
-// declared — the same trick `app.translations.tsx` uses, and for the same
-// reason: mutating a hidden intent field from a click handler loses the race
-// against the native submit.
+// Three steps:
 //
 //   no `map:` fields, no `intent`  → read the file, report its columns
 //   `map:` fields present          → plan, and show the diff
 //   `intent=apply`                 → re-plan against the store, then write
+//
+// All three post the same form, and every submit is made **programmatically**
+// from the button's click handler — `fetcher.submit(new FormData(form))` with
+// the intent appended — rather than by letting `s-button type="submit"` fire a
+// native submit.
+//
+// That is the fix for the bug this page shipped with. `s-button` is a custom
+// element, so its "submit" is its own click handler calling `requestSubmit()`,
+// not a browser default action deferred until after the event has propagated.
+// A React `onClick` on the host runs from the delegated root listener, i.e.
+// after that — so the old "write the intent into a hidden field on click"
+// trick serialised the *previous* click's intent. `Review changes` happened to
+// want the empty string it already had, but `Update N products` posted a stale
+// `""` and merely re-planned; only a second click ever wrote anything.
+// `app.translations.tsx` documents the same race as its reason for not
+// mutating an intent field from a click handler. Submitting explicitly removes
+// the ordering question altogether instead of betting on it.
 //
 // The file is re-posted on every step rather than echoed back through a hidden
 // field. A product export runs to megabytes and round-tripping it through the
@@ -501,14 +516,33 @@ export default function ProductUpdatePage() {
     data && (data.step === "inspect" || data.step === "plan") ? data : null;
   const plan = data?.step === "plan" ? data.plan : null;
 
-  // Which step a submit means is carried in a hidden field written straight to
-  // the DOM on click. Both buttons live in the same form — they have to, since
-  // the form holds the file and the mapping — and `s-button` accepts no
-  // `name`/`value` of its own. A React state update here would lose the race
-  // against the native submit; a ref mutation is synchronous and cannot.
-  const intentRef = useRef<HTMLInputElement>(null);
-  const setIntent = (value: string) => () => {
-    if (intentRef.current) intentRef.current.value = value;
+  // Both buttons live in the same form — they have to, since the form holds
+  // the file and the mapping — and `s-button` accepts no `name`/`value` of its
+  // own, so the step cannot ride on the submitter. It is appended here instead,
+  // at the moment of submitting, which is the one place it cannot be stale.
+  const formRef = useRef<HTMLFormElement>(null);
+
+  const submitWith = (intent: string) => () => {
+    const form = formRef.current;
+    if (!form) return;
+    // A programmatic submit skips the constraint validation a native one runs,
+    // and the file input is `required` — without this, forgetting to choose a
+    // file would round-trip to the server just to be told so.
+    if (!form.reportValidity()) return;
+
+    const formData = new FormData(form);
+    if (intent) formData.set("intent", intent);
+    fetcher.submit(formData, {
+      method: "post",
+      encType: "multipart/form-data",
+    });
+  };
+
+  // Enter in a field still submits natively; treat that as "review", which is
+  // the non-destructive step.
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    submitWith("")();
   };
 
   // Targets grouped for the dropdown, so a forty-column file is browsable.
@@ -521,9 +555,12 @@ export default function ProductUpdatePage() {
 
   return (
     <s-page heading="Update products from CSV">
-      <fetcher.Form method="post" encType="multipart/form-data">
-        <input type="hidden" name="intent" defaultValue="" ref={intentRef} />
-
+      <fetcher.Form
+        method="post"
+        encType="multipart/form-data"
+        ref={formRef}
+        onSubmit={onSubmit}
+      >
         <s-section heading="Your file">
           <s-stack direction="block" gap="base">
             <s-paragraph>
@@ -553,8 +590,12 @@ export default function ProductUpdatePage() {
 
             <s-paragraph>
               A Shopify product export needs no setup — its columns are
-              recognised automatically. Any other CSV can be mapped by hand
-              below.
+              recognised automatically, and so are the everyday spellings a
+              hand-made sheet uses (<s-text>Price</s-text>,{" "}
+              <s-text>SKU</s-text>, <s-text>Quantity</s-text>,{" "}
+              <s-text>Description</s-text>). Anything else can be pointed at a
+              field by hand below, and every guess can be changed or switched
+              off there.
             </s-paragraph>
 
             <label className={styles.fileField}>
@@ -570,7 +611,11 @@ export default function ProductUpdatePage() {
 
             {!report && (
               <div className={styles.actions}>
-                <s-button type="submit" {...(busy ? { loading: true } : {})}>
+                <s-button
+                  type="button"
+                  onClick={submitWith("")}
+                  {...(busy ? { loading: true } : {})}
+                >
                   Read columns
                 </s-button>
               </div>
@@ -684,11 +729,9 @@ export default function ProductUpdatePage() {
               </div>
 
               <div className={styles.actions}>
-                {/* Resets the intent: without it, reviewing again after an
-                    apply would write straight away. */}
                 <s-button
-                  type="submit"
-                  onClick={setIntent("")}
+                  type="button"
+                  onClick={submitWith("")}
                   {...(busy ? { loading: true } : {})}
                 >
                   Review changes
@@ -787,9 +830,9 @@ export default function ProductUpdatePage() {
 
               <div className={styles.actions}>
                 <s-button
-                  type="submit"
+                  type="button"
                   variant="primary"
-                  onClick={setIntent("apply")}
+                  onClick={submitWith("apply")}
                   {...(busy ? { loading: true } : {})}
                   {...(plan.writeCount === 0 ? { disabled: true } : {})}
                 >

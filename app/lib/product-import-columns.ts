@@ -214,6 +214,56 @@ export function ignoredReason(header: string): string | null {
   return null;
 }
 
+/**
+ * Everyday spellings for the fields a hand-made CSV actually carries.
+ *
+ * Shopify's export calls the price column `Variant Price`; a supplier's price
+ * list, or a sheet someone maintains by hand, calls it `Price`. Both mean the
+ * same field, and making the merchant re-map `Price` → Variant Price on every
+ * run is friction with no safety benefit — the mapping table still shows what
+ * was matched, and still lets any guess be overridden or switched off.
+ *
+ * Consulted only *after* an exact match on Shopify's own column names fails, so
+ * a real product export resolves exactly as it did before. Deliberately narrow:
+ * only spellings with one plausible meaning are here. `Weight` is absent
+ * because it is ambiguous with `Variant Grams` on unit, `Cost` because it reads
+ * as either cost price or retail depending on the sheet, and `Image`/`Category`
+ * because getting those wrong writes to the wrong place.
+ */
+const COLUMN_ALIASES: Record<string, string> = {
+  // Matching
+  productname: "identity.title",
+  name: "identity.title",
+  urlhandle: "identity.handle",
+  slug: "identity.handle",
+
+  // Variant
+  price: "variant.price",
+  sellingprice: "variant.price",
+  retailprice: "variant.price",
+  compareatprice: "variant.compareAtPrice",
+  rrp: "variant.compareAtPrice",
+  sku: "variant.sku",
+  barcode: "variant.barcode",
+  ean: "variant.barcode",
+  upc: "variant.barcode",
+  unitcost: "variant.cost",
+
+  // Product
+  description: "product.descriptionHtml",
+  body: "product.descriptionHtml",
+  brand: "product.vendor",
+  manufacturer: "product.vendor",
+  producttype: "product.productType",
+
+  // Inventory
+  quantity: "inventory.available",
+  qty: "inventory.available",
+  stock: "inventory.available",
+  inventory: "inventory.available",
+  inventoryquantity: "inventory.available",
+};
+
 /** Turn a store's metafield definitions into mappable targets. */
 export function metafieldTargets(
   definitions: RichTextDefinition[],
@@ -249,7 +299,8 @@ export type ResolvedHeaders = {
  *
  * Three sources, in increasing precedence:
  *
- *  1. Shopify's column names, matched loosely on letters and digits.
+ *  1. Shopify's column names, matched loosely on letters and digits, then the
+ *     everyday spellings in COLUMN_ALIASES for a CSV that is not an export.
  *  2. `… (product.metafields.ns.key)` columns, resolved against the store's own
  *     definitions — an export carries a column for every metafield the product
  *     has, including ones no definition covers, and those are unrecognised
@@ -303,9 +354,23 @@ export function resolveHeaders(
       continue;
     }
 
-    // --- Shopify's own column names ---------------------------------------
-    const auto = byLabel.get(normalizeHeader(column));
-    if (auto && !claimed.has(auto.field)) {
+    // --- Shopify's own column names, then everyday spellings ---------------
+    const normalized = normalizeHeader(column);
+    const aliased = COLUMN_ALIASES[normalized];
+    const auto =
+      byLabel.get(normalized) ?? (aliased ? byField.get(aliased) : undefined);
+
+    if (auto) {
+      // A file carrying both `Variant Price` and `Price` must not have the
+      // second silently win, and must not be reported as unrecognised either —
+      // it is a duplicate of a column already going somewhere.
+      if (claimed.has(auto.field)) {
+        ignored.push({
+          column,
+          reason: `Another column is already mapped to ${auto.label}.`,
+        });
+        continue;
+      }
       claimed.add(auto.field);
       byColumn.set(column, auto);
       autoMatched.push(column);
