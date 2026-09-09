@@ -15,11 +15,9 @@ License: attribution only.
    acknowledge me lewing@isc.tamu.edu and The GIMP if someone asks."
       — Larry Ewing
 
-The required acknowledgement is rendered on the public login page
-(app/routes/_index/route.tsx) and repeated here. On the embedded metaobjects
-page Tux appears only as a faint background watermark, where this file carries
-the attribution. The image itself is unmodified from the Wikimedia Commons
-original.
+Tux is used on the public login page only (app/routes/_index/route.tsx), which
+renders the required acknowledgement on screen. It is repeated here. The image
+itself is unmodified from the Wikimedia Commons original.
 
 Note: "Linux" is a registered trademark of Linus Torvalds. Tux is used here
 decoratively and does not imply endorsement.

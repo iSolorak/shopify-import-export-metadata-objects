@@ -183,19 +183,6 @@
   }
 }
 
-/* Watermark Tux in the corner. Kept whole and fairly small — cropped and
-   scaled up he stops reading as a penguin and turns into a grey smudge. */
-.watermarkTux {
-  position: absolute;
-  right: 2.5rem;
-  bottom: 2rem;
-  width: 16rem;
-  max-width: 35vw;
-  opacity: 0.13;
-  filter: grayscale(1) brightness(1.9) contrast(1.15)
-    drop-shadow(0 0 2rem rgba(0, 255, 148, 0.45));
-}
-
 /* Decoration only — hold everything still when the reader asks for that. */
 @media (prefers-reduced-motion: reduce) {
   .sweep {

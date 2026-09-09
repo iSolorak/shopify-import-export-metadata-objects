@@ -337,7 +337,6 @@ function HackBackdrop() {
       <div className={styles.grid} />
       <div className={styles.sweep} />
       <div className={styles.scanlines} />
-      <img className={styles.watermarkTux} src="/tux.svg" alt="" />
     </div>
   );
 }
