@@ -42,9 +42,14 @@ export type VariantRow = {
   sku: string;
 };
 
+/** Which column a file uses to find the product a row belongs to. */
+export type MatchedBy = "handle" | "title" | "sku";
+
 export type ProductRow = {
-  /** Whichever of handle/title the file identifies products by. */
+  /** Whichever of handle/title/SKU the file identifies products by. */
   key: string;
+  /** Which of the three that was, so an error can name the right column. */
+  matchedBy: MatchedBy;
   handle: string;
   title: string;
   /** Every CSV row that contributed, for error messages. */
@@ -88,15 +93,37 @@ function cell(
  * significant, and a file sorted so a product's rows are not adjacent will read
  * as several products — which the planner then reports as duplicates rather
  * than merging blindly.
+ *
+ * Handle, then Title, then Variant SKU. SKU is last because it identifies a
+ * *variant*, and the product is whatever that variant hangs off — so a
+ * SKU-keyed file is one row per variant and each row stands alone, with no
+ * continuation rows to join. That is exactly what a supplier price list looks
+ * like, which is the case it exists for.
  */
 export function groupRows(
   records: Record<string, string>[],
   byColumn: Map<string, FieldTarget>,
 ): { rows: ProductRow[]; errors: string[] } {
-  const hasHandle = [...byColumn.values()].some(
-    (target) => target.field === "identity.handle",
-  );
-  const identityField = hasHandle ? "identity.handle" : "identity.title";
+  const has = (field: string) =>
+    [...byColumn.values()].some((target) => target.field === field);
+
+  const matchedBy: MatchedBy = has("identity.handle")
+    ? "handle"
+    : has("identity.title")
+      ? "title"
+      : "sku";
+  const identityField =
+    matchedBy === "handle"
+      ? "identity.handle"
+      : matchedBy === "title"
+        ? "identity.title"
+        : "variant.sku";
+  const identityLabel =
+    matchedBy === "handle"
+      ? "Handle"
+      : matchedBy === "title"
+        ? "Title"
+        : "Variant SKU";
 
   const rows: ProductRow[] = [];
   const byKey = new Map<string, ProductRow>();
@@ -128,6 +155,7 @@ export function groupRows(
       if (!seen) {
         current = {
           key,
+          matchedBy,
           handle,
           title,
           rowNumbers: [],
@@ -144,7 +172,7 @@ export function groupRows(
       // A continuation row with nothing above it to continue.
       if (rowNumber === 2 || rows.length === 0) {
         errors.push(
-          `Row ${rowNumber}: no ${hasHandle ? "Handle" : "Title"}, and no product above it to belong to.`,
+          `Row ${rowNumber}: no ${identityLabel}, and no product above it to belong to.`,
         );
       }
       return;
@@ -244,6 +272,8 @@ export type MetafieldPlan = {
 
 export type ProductPlan = {
   key: string;
+  /** How the row found its product, so the review table can label it. */
+  matchedBy: MatchedBy;
   handle: string;
   title: string;
   rowNumbers: number[];
@@ -804,6 +834,7 @@ export function planProductUpdate(
       key: row.key,
       handle: row.handle,
       title: row.title,
+      matchedBy: row.matchedBy,
       rowNumbers: row.rowNumbers,
       changes,
       errors,
@@ -818,7 +849,9 @@ export function planProductUpdate(
         ...base,
         action: "error" as const,
         errors: [
-          `Several products share the title "${row.title}". Add a Handle column so the right one can be identified.`,
+          row.matchedBy === "sku"
+            ? `The SKU "${row.key}" is on more than one variant in this store, so there is no single product to update. Make the SKU unique, or use a Handle column.`
+            : `Several products share the title "${row.title}". Add a Handle column so the right one can be identified.`,
         ],
       };
     }
@@ -829,9 +862,11 @@ export function planProductUpdate(
         ...base,
         action: "error" as const,
         errors: [
-          row.handle
+          row.matchedBy === "handle"
             ? `No product with the handle "${row.handle}".`
-            : `No product with the title "${row.title}".`,
+            : row.matchedBy === "title"
+              ? `No product with the title "${row.title}".`
+              : `No variant with the SKU "${row.key}" in this store.`,
         ],
       };
     }

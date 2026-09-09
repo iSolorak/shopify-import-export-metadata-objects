@@ -21,6 +21,7 @@ import {
 import {
   findCategories,
   getProductsForUpdate,
+  getProductsForUpdateBySku,
   getProductsForUpdateByTitle,
   listLocations,
   metaobjectRefsIn,
@@ -203,15 +204,21 @@ async function buildPlan(
   const columns = rows[0].map((header) => header.trim());
   const resolved = resolveHeaders(columns, targets, mapping);
 
-  const identifies = [...resolved.byColumn.values()].some(
-    (target) =>
-      target.field === "identity.handle" || target.field === "identity.title",
-  );
-  if (!identifies) {
+  const mapsTo = (field: string) =>
+    [...resolved.byColumn.values()].some((target) => target.field === field);
+
+  // Handle, Title or Variant SKU — in that order of preference, matching what
+  // `groupRows` picks. SKU counts because it identifies a variant, and the
+  // product is whatever that variant belongs to.
+  if (
+    !mapsTo("identity.handle") &&
+    !mapsTo("identity.title") &&
+    !mapsTo("variant.sku")
+  ) {
     return {
       ok: false,
       message:
-        "No column is matching products yet. Point one at Handle (or Title) so each row can find the product it updates.",
+        "No column is matching products yet. Point one at Handle, Title or Variant SKU so each row can find the product it updates.",
     };
   }
 
@@ -238,24 +245,36 @@ async function buildPlan(
     else variantRefs.push(ref);
   }
 
-  const usesHandle = [...resolved.byColumn.values()].some(
-    (target) => target.field === "identity.handle",
-  );
-
   let products = new Map<string, ExistingProduct>();
   let ambiguous = new Set<string>();
 
-  if (usesHandle) {
+  // `groupRows` has already decided which of the three identifies a row, and
+  // recorded it on every row. Reading it back from there rather than
+  // re-deriving it is what keeps the lookup and the grouping from disagreeing
+  // about what `row.key` holds.
+  const matchedBy = grouped.rows[0]?.matchedBy ?? "handle";
+
+  if (matchedBy === "handle") {
     products = await getProductsForUpdate(
       admin,
       grouped.rows.map((row) => row.handle),
       productRefs,
       variantRefs,
     );
-  } else {
+  } else if (matchedBy === "title") {
     const found = await getProductsForUpdateByTitle(
       admin,
       grouped.rows.map((row) => row.title),
+      productRefs,
+      variantRefs,
+    );
+    products = found.products;
+    ambiguous = found.ambiguous;
+  } else {
+    // `row.key` is the lowercased SKU, which is how the lookup keys its map.
+    const found = await getProductsForUpdateBySku(
+      admin,
+      grouped.rows.map((row) => row.key),
       productRefs,
       variantRefs,
     );
@@ -474,13 +493,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // before its quantity is set, or turning tracking on and setting a
     // quantity in the same run would fail on the second call.
     for (const product of built.plan.products) {
+      // A SKU-keyed file has no handle or title to name a row by, so the key
+      // stands in — without it every failure would read ": <message>".
+      const label =
+        product.handle ||
+        product.title ||
+        (product.matchedBy === "sku" ? `SKU ${product.key}` : product.key);
+
       for (const error of product.errors) {
-        failures.push(`${product.handle || product.title}: ${error}`);
+        failures.push(`${label}: ${error}`);
       }
 
       if (product.action !== "update" || !product.productId) continue;
-
-      const label = product.handle || product.title;
       let wrote = false;
 
       try {
@@ -625,12 +649,20 @@ export default function ProductUpdatePage() {
             </s-paragraph>
 
             <s-paragraph>
-              Rows are matched by <strong>Handle</strong>, or by{" "}
-              <strong>Title</strong> if there is no handle column. A row matching
-              no product is reported as an error — products are never created.
-              Variants are matched by <s-text>Variant SKU</s-text>, then by their
-              option values; variants your file does not mention are left
-              untouched, and none are ever created or deleted.
+              Rows are matched by <strong>Handle</strong>, then{" "}
+              <strong>Title</strong>, then <strong>Variant SKU</strong> —
+              whichever your file has, in that order. A SKU-only file is enough
+              on its own: the product is whatever variant carries that SKU, so a
+              supplier price list of just SKU and price works without pasting
+              handles into it first. A row matching no product is reported as an
+              error — products are never created.
+            </s-paragraph>
+
+            <s-paragraph>
+              Within a product, variants are matched by{" "}
+              <s-text>Variant SKU</s-text>, then by their option values.
+              Variants your file does not mention are left untouched, and none
+              are ever created or deleted.
             </s-paragraph>
 
             <s-paragraph>
@@ -825,7 +857,14 @@ export default function ProductUpdatePage() {
                     {plan.products.slice(0, 100).map((product) => (
                       <s-table-row key={product.key}>
                         <s-table-cell>
-                          {product.handle || product.title || "—"}
+                          {/* A SKU-keyed file carries neither handle nor
+                              title, so the key is the only name the row has
+                              until the product is found. */}
+                          {product.handle ||
+                            product.title ||
+                            (product.matchedBy === "sku"
+                              ? `SKU ${product.key}`
+                              : "—")}
                         </s-table-cell>
                         <s-table-cell>
                           <s-badge

@@ -496,6 +496,106 @@ export async function getProductsForUpdateByTitle(
   return { products, ambiguous };
 }
 
+/** SKUs per search query. Each match pulls a whole product, so keep it small. */
+const SKU_BATCH_SIZE = 5;
+
+/**
+ * Look up products by variant SKU, for a file with neither handle nor title.
+ *
+ * A supplier's price list is usually just SKU and price — the merchant's own
+ * handles never appear in it — so this is what makes such a file usable without
+ * first pasting handles into it by hand.
+ *
+ * Two things are deliberate. The search is filtered to an **exact**
+ * case-insensitive SKU afterwards, because Shopify's `sku:` search tokenises
+ * and would otherwise let `ABC-1` match `ABC-10`. And a SKU found on more than
+ * one variant is returned in `ambiguous` rather than resolved: Shopify does not
+ * enforce SKU uniqueness, and picking one of two variants at random is the
+ * silent damage this importer exists to prevent.
+ */
+export async function getProductsForUpdateBySku(
+  admin: Admin,
+  skus: string[],
+  productRefs: MetafieldRef[],
+  variantRefs: MetafieldRef[],
+): Promise<{
+  products: Map<string, ExistingProduct>;
+  ambiguous: Set<string>;
+}> {
+  const document = `#graphql
+    query ProductsForUpdateBySku(
+      $search: String!
+      $pageSize: Int!
+      $cursor: String
+    ) {
+      productVariants(first: $pageSize, query: $search, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          sku
+          product {
+            ${productSelection(productRefs, variantRefs)}
+          }
+        }
+      }
+    }
+  `;
+
+  const wanted = new Set(skus.map((sku) => sku.trim().toLowerCase()));
+  const products = new Map<string, ExistingProduct>();
+  const ambiguous = new Set<string>();
+  const seenVariantIds = new Set<string>();
+
+  const unique = [...new Set(skus.map((sku) => sku.trim()))].filter(Boolean);
+
+  for (let start = 0; start < unique.length; start += SKU_BATCH_SIZE) {
+    const batch = unique.slice(start, start + SKU_BATCH_SIZE);
+    const search = batch
+      .map((sku) => `sku:"${sku.replace(/(["\\])/g, "\\$1")}"`)
+      .join(" OR ");
+
+    let cursor: string | null = null;
+    do {
+      const data: {
+        productVariants: {
+          pageInfo: PageInfo;
+          nodes: { id: string; sku: string | null; product: ProductNode | null }[];
+        };
+      } = await query(admin, document, { search, pageSize: 25, cursor });
+
+      for (const node of data.productVariants.nodes) {
+        const key = (node.sku ?? "").trim().toLowerCase();
+        if (!key || !wanted.has(key)) continue;
+        if (seenVariantIds.has(node.id)) continue;
+        seenVariantIds.add(node.id);
+        if (!node.product) continue;
+
+        const existing = products.get(key);
+        // The same SKU on two variants of the *same* product is still one
+        // product to update, and the variant matcher will pick the right one.
+        if (existing && existing.id !== node.product.id) {
+          ambiguous.add(key);
+          continue;
+        }
+        if (existing) continue;
+
+        products.set(
+          key,
+          toExistingProduct(node.product, productRefs, variantRefs),
+        );
+      }
+
+      cursor = data.productVariants.pageInfo.hasNextPage
+        ? data.productVariants.pageInfo.endCursor
+        : null;
+    } while (cursor);
+  }
+
+  for (const key of ambiguous) products.delete(key);
+
+  return { products, ambiguous };
+}
+
 // ---------------------------------------------------------------------------
 // Locations
 // ---------------------------------------------------------------------------
