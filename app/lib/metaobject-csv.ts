@@ -4,6 +4,7 @@
 // once, so a file this app produced is always a file it can read back.
 
 import { toCsv } from "./csv";
+import { fileUrlsIn, isFileFieldType, toFileValue } from "./file-cells";
 import type { Definition, Entry } from "./metaobjects.server";
 
 /**
@@ -84,7 +85,21 @@ export type RowPlan = {
   /** Field keys whose value differs from what is in the store. */
   changedFields: string[];
   message?: string;
+  /** Resolved values, ready to write — file URLs already replaced by gids. */
   values: Record<string, string>;
+  /**
+   * Source URLs on this row with no gid yet.
+   *
+   * Non-empty means the row cannot be written until they are uploaded, so the
+   * apply step uploads first and plans again.
+   */
+  pendingUploads: string[];
+};
+
+/** What the planner needs that it cannot work out on its own. */
+export type EntryPlanContext = {
+  /** Source URL → file gid, for the images already in the store. */
+  files: Map<string, string>;
 };
 
 export type ImportPlan = {
@@ -95,7 +110,46 @@ export type ImportPlan = {
   unknownColumns: string[];
   /** Field keys the definition requires that the file has no column for. */
   missingRequiredColumns: string[];
+  /** Distinct source URLs still to upload, across every row. */
+  pendingUploads: string[];
+  /** How many URL cells resolved to a file already in the store. */
+  reusedFiles: number;
 };
+
+/**
+ * Every image URL the file refers to, paired with the handle of the row it is
+ * on, so the caller can derive filenames and look the images up before planning.
+ *
+ * Gathered here rather than inside the planner, which is pure by design and
+ * cannot await the lookup its own diff depends on.
+ */
+export function fileUrlsInRecords(
+  definition: Definition,
+  records: Record<string, string>[],
+): { handle: string; url: string }[] {
+  const fileKeys = definition.fieldDefinitions
+    .filter((field) => isFileFieldType(field.type))
+    .map((field) => field.key);
+  if (!fileKeys.length) return [];
+
+  const seen = new Set<string>();
+  const refs: { handle: string; url: string }[] = [];
+
+  for (const record of records) {
+    const handle = (record[HANDLE_COLUMN] ?? "").trim();
+    for (const key of fileKeys) {
+      for (const url of fileUrlsIn(record[key] ?? "")) {
+        // One upload per distinct URL, whichever row reaches it first — the
+        // same image used by ten entries must not become ten files.
+        if (seen.has(url)) continue;
+        seen.add(url);
+        refs.push({ handle: handle || "image", url });
+      }
+    }
+  }
+
+  return refs;
+}
 
 /**
  * Compare a parsed CSV against the store and decide what each row would do,
@@ -104,11 +158,19 @@ export type ImportPlan = {
  * Unchanged rows are identified so a re-import of an unedited export reports
  * "nothing to do" instead of rewriting every entry, which would otherwise
  * churn `updatedAt` on the whole set and burn the mutation rate limit.
+ *
+ * File cells are resolved to gids *before* the diff, not during the write. A
+ * stored `gid://…` never equals a cell holding `https://…`, so a row carrying
+ * an image URL would otherwise look changed on every single run and rewrite the
+ * whole set forever. Resolving first is what lets an unedited re-import report
+ * "unchanged" — and it is why the caller does the read-only filename lookup
+ * during planning, when nothing has been written yet.
  */
 export function planEntryImport(
   definition: Definition,
   records: Record<string, string>[],
   existing: Entry[],
+  context: EntryPlanContext = { files: new Map() },
 ): ImportPlan {
   const fieldKeys = definition.fieldDefinitions.map((field) => field.key);
   const knownKeys = new Set(fieldKeys);
@@ -132,6 +194,14 @@ export function planEntryImport(
     knownKeys.has(column),
   );
 
+  // Field key → type, so a file cell can be told from an ordinary one.
+  const typeByKey = new Map(
+    definition.fieldDefinitions.map((field) => [field.key, field.type]),
+  );
+
+  const allPending = new Set<string>();
+  let reusedFiles = 0;
+
   const seenHandles = new Set<string>();
   const rows: RowPlan[] = records.map((record, index) => {
     // +2: one for the header row, one because spreadsheets number from 1.
@@ -139,9 +209,48 @@ export function planEntryImport(
     const handle = (record[HANDLE_COLUMN] ?? "").trim();
 
     const values: Record<string, string> = {};
-    for (const column of writableColumns) values[column] = record[column] ?? "";
+    const pendingUploads: string[] = [];
+    let fileError: string | null = null;
 
-    const base = { rowNumber, handle, values, changedFields: [] as string[] };
+    for (const column of writableColumns) {
+      const raw = record[column] ?? "";
+      const fieldType = typeByKey.get(column) ?? "";
+
+      // A blank cell is left alone here as everywhere else: the required-field
+      // check below is what decides whether an empty value is a problem.
+      if (!raw.trim() || !isFileFieldType(fieldType)) {
+        values[column] = raw;
+        continue;
+      }
+
+      const converted = toFileValue(fieldType, raw, context.files);
+      if (!converted.ok) {
+        fileError ??= `${column}: ${converted.message}`;
+        values[column] = raw;
+        continue;
+      }
+
+      values[column] = converted.value;
+      for (const url of converted.pending) {
+        pendingUploads.push(url);
+        allPending.add(url);
+      }
+      // A cell that resolved without anything pending, and was not already a
+      // gid, was satisfied entirely from files the store already had.
+      if (!converted.pending.length && fileUrlsIn(raw).length) reusedFiles++;
+    }
+
+    const base = {
+      rowNumber,
+      handle,
+      values,
+      changedFields: [] as string[],
+      pendingUploads,
+    };
+
+    if (fileError) {
+      return { ...base, action: "error" as const, message: fileError };
+    }
 
     if (!handle) {
       return {
@@ -198,6 +307,8 @@ export function planEntryImport(
     counts,
     unknownColumns,
     missingRequiredColumns,
+    pendingUploads: [...allPending],
+    reusedFiles,
   };
 }
 

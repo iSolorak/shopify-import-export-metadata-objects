@@ -1,6 +1,7 @@
 /* Polaris web components style themselves inside shadow DOM, so this file only
    covers the light-DOM wrappers around them: the button rows, the native file
-   input, and the scroll container for the plan table. */
+   input, the scroll container for the plan table, and the hackish Tux backdrop
+   that sits behind the whole page. */
 
 .actions {
   display: flex;
@@ -90,5 +91,255 @@
 
   .fileInput:hover {
     border-color: #8a8a8a;
+  }
+}
+
+/* ------------------------------------------------------------------------
+   Hackish dark theme
+   ------------------------------------------------------------------------
+   The backdrop is painted by a fixed, z-index:-1 layer, which only shows if
+   the body behind it is transparent — so the route adds `.hackBody` to
+   document.body while it is mounted and removes it on unmount. Everything
+   here is decorative: no interactive element depends on it. */
+
+.hackBody {
+  background: #04070a !important;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      70rem 40rem at 12% -10%,
+      rgba(0, 255, 148, 0.16),
+      transparent 65%
+    ),
+    radial-gradient(
+      55rem 35rem at 105% 20%,
+      rgba(0, 176, 255, 0.14),
+      transparent 60%
+    ),
+    radial-gradient(
+      45rem 45rem at 50% 115%,
+      rgba(255, 146, 30, 0.1),
+      transparent 60%
+    ),
+    #04070a;
+}
+
+/* Faint terminal grid. */
+.grid {
+  position: absolute;
+  inset: -2px;
+  background-image:
+    linear-gradient(rgba(0, 255, 148, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 148, 0.055) 1px, transparent 1px);
+  background-size: 2.5rem 2.5rem;
+  mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 85%);
+  -webkit-mask-image: radial-gradient(
+    120% 100% at 50% 0%,
+    #000 35%,
+    transparent 85%
+  );
+}
+
+/* CRT scanlines. */
+.scanlines {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.28) 0 1px,
+    transparent 1px 3px
+  );
+  opacity: 0.5;
+}
+
+/* A slow bright band sweeping down the screen, like a refresh line. */
+.sweep {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 22rem;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(0, 255, 148, 0.07),
+    transparent
+  );
+  animation: sweep 9s linear infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateY(-24rem);
+  }
+  to {
+    transform: translateY(105vh);
+  }
+}
+
+/* Watermark Tux in the corner. Kept whole and fairly small — cropped and
+   scaled up he stops reading as a penguin and turns into a grey smudge. */
+.watermarkTux {
+  position: absolute;
+  right: 2.5rem;
+  bottom: 2rem;
+  width: 16rem;
+  max-width: 35vw;
+  opacity: 0.13;
+  filter: grayscale(1) brightness(1.9) contrast(1.15)
+    drop-shadow(0 0 2rem rgba(0, 255, 148, 0.45));
+}
+
+/* ---- Terminal hero ---------------------------------------------------- */
+
+.terminal {
+  --edge: rgba(0, 255, 148, 0.28);
+
+  border: 1px solid var(--edge);
+  border-radius: 0.75rem;
+  background: rgba(4, 10, 8, 0.92);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 1.5rem 3rem rgba(0, 0, 0, 0.55),
+    0 0 4rem rgba(0, 255, 148, 0.09) inset;
+  color: #b8ffd9;
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas,
+    monospace;
+  overflow: hidden;
+}
+
+.terminalBar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--edge);
+  background: rgba(0, 255, 148, 0.06);
+}
+
+.dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  flex: none;
+}
+
+.dotRed {
+  background: #ff5f57;
+}
+.dotAmber {
+  background: #febc2e;
+}
+.dotGreen {
+  background: #28c840;
+}
+
+.terminalTitle {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: #6fd6a3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminalBody {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 1.25rem;
+}
+
+/* Stack the penguin above the text once they no longer fit side by side. */
+@media (max-width: 34rem) {
+  .terminalBody {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+}
+
+.heroTux {
+  width: 6.5rem;
+  flex: none;
+  filter: drop-shadow(0 0 0.9rem rgba(0, 255, 148, 0.55));
+  animation: bob 5s ease-in-out infinite;
+}
+
+@keyframes bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.4rem);
+  }
+}
+
+.termLines {
+  min-width: 0;
+  font-size: 0.8125rem;
+  line-height: 1.7;
+}
+
+.termLine {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+.prompt {
+  color: #00ff94;
+}
+
+.muted {
+  color: #4f8f72;
+}
+
+.accent {
+  color: #7fe0ff;
+}
+
+/* Blinking block cursor at the end of the last line. */
+.cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.15em;
+  vertical-align: text-bottom;
+  background: #00ff94;
+  animation: blink 1.1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.credit {
+  padding: 0 1.25rem 1rem;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  color: #4f8f72;
+}
+
+.credit a {
+  color: #6fd6a3;
+}
+
+/* Decoration only — hold everything still when the reader asks for that. */
+@media (prefers-reduced-motion: reduce) {
+  .sweep,
+  .heroTux,
+  .cursor {
+    animation: none;
   }
 }

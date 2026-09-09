@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 
@@ -12,12 +12,22 @@ import {
   upsertEntry,
 } from "../../lib/metaobjects.server";
 import {
+  DISPLAY_NAME_COLUMN,
+  HANDLE_COLUMN,
+  fileUrlsInRecords,
   isDefinitionCsv,
   planDefinitionImport,
   planEntryImport,
   type ImportPlan,
 } from "../../lib/metaobject-csv";
+import {
+  createFilesFromUrls,
+  findFilesByFilename,
+  uploadFilenameFor,
+  type FileUpload,
+} from "../../lib/files.server";
 import { downloadCsv } from "../../lib/download-csv";
+import type { Definition } from "../../lib/metaobjects.server";
 import styles from "./styles.module.css";
 
 // Export metaobjects to CSV, and import a CSV back to create or update them.
@@ -29,13 +39,87 @@ import styles from "./styles.module.css";
 type ActionData =
   | { step: "plan"; plan: ImportPlan; csv: string; type: string }
   | { step: "plan-definition"; summary: string[]; csv: string }
-  | { step: "applied"; created: number; updated: number; failures: string[] }
+  | {
+      step: "applied";
+      created: number;
+      updated: number;
+      /** Images pulled from their source URLs into Content → Files. */
+      uploaded: number;
+      failures: string[];
+    }
   | { step: "error"; message: string };
 
 // A single import runs one mutation per changed row against a rate-limited API.
 // Past this many rows the request outlives a sensible HTTP timeout, so the file
 // is rejected with an explanation rather than dying halfway through.
 const MAX_ROWS = 1000;
+
+/**
+ * Distinct new images per import.
+ *
+ * Each one is a `fileCreate` that Shopify fulfils by fetching the URL itself,
+ * so the cost is a round trip rather than a download — but it is still inside a
+ * request nginx gives 300 seconds. Because a resolved image is reused rather
+ * than re-uploaded, splitting a larger file and running it twice costs nothing
+ * for the images that already landed.
+ */
+const MAX_NEW_FILES = 100;
+
+type Admin = Parameters<typeof findFilesByFilename>[0];
+
+/**
+ * Resolve the file URLs in a CSV to gids, without uploading anything.
+ *
+ * Read-only on purpose, and run during the plan step: the diff cannot be taken
+ * until file cells hold gids (see `planEntryImport`), and the plan step's whole
+ * promise is that nothing has been written yet. Anything this does not find is
+ * reported as a pending upload and dealt with on apply.
+ */
+async function resolveExistingFiles(
+  admin: Admin,
+  definition: Definition,
+  records: Record<string, string>[],
+): Promise<{ files: Map<string, string>; uploads: FileUpload[] }> {
+  const refs = fileUrlsInRecords(definition, records);
+  if (!refs.length) return { files: new Map(), uploads: [] };
+
+  // Alt text comes from `display_name`, falling back to the handle. It is the
+  // only human-readable label a row carries, it is on every entries CSV this
+  // app exports, and an image landing in Files with no alt is both unsearchable
+  // and inaccessible.
+  const altByUrl = new Map<string, string>();
+  for (const record of records) {
+    const alt =
+      (record[DISPLAY_NAME_COLUMN] ?? "").trim() ||
+      (record[HANDLE_COLUMN] ?? "").trim();
+    // First row to mention a URL names it; the same image shared by several
+    // entries is one file, so it can only carry one alt.
+    for (const ref of fileUrlsInRecords(definition, [record])) {
+      if (!altByUrl.has(ref.url)) altByUrl.set(ref.url, alt);
+    }
+  }
+
+  const uploads: FileUpload[] = refs.map((ref) => ({
+    url: ref.url,
+    filename: uploadFilenameFor(ref.handle, ref.url),
+    alt: altByUrl.get(ref.url) ?? ref.handle,
+  }));
+
+  const existing = await findFilesByFilename(
+    admin,
+    uploads.map((upload) => upload.filename),
+  );
+
+  const files = new Map<string, string>();
+  const missing: FileUpload[] = [];
+  for (const upload of uploads) {
+    const id = existing.get(upload.filename.toLowerCase());
+    if (id) files.set(upload.url, id);
+    else missing.push(upload);
+  }
+
+  return { files, uploads: missing };
+}
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
@@ -106,12 +190,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       const existing = await getEntries(admin, type);
-      return {
-        step: "plan",
-        plan: planEntryImport(definition, records, existing),
-        csv,
-        type,
-      } as const;
+      // Read-only: images already in the store resolve now, so an unedited
+      // re-import can still report "unchanged". The rest are counted as
+      // pending and uploaded only once the merchant confirms.
+      const { files } = await resolveExistingFiles(admin, definition, records);
+
+      const plan = planEntryImport(definition, records, existing, { files });
+      if (plan.pendingUploads.length > MAX_NEW_FILES) {
+        return {
+          step: "error",
+          message: `That file introduces ${plan.pendingUploads.length} new images. Import at most ${MAX_NEW_FILES} at a time — images already uploaded are reused, so splitting the file costs nothing.`,
+        } as const;
+      }
+
+      return { step: "plan", plan, csv, type } as const;
     }
 
     // --- Step 2: write ----------------------------------------------------
@@ -127,7 +219,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           if (result.ok) created++;
           else failures.push(`${definition.type}: ${result.errors.join("; ")}`);
         }
-        return { step: "applied", created, updated: 0, failures } as const;
+        return {
+          step: "applied",
+          created,
+          updated: 0,
+          uploaded: 0,
+          failures,
+        } as const;
       }
 
       const type = String(formData.get("type") ?? "");
@@ -139,6 +237,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         } as const;
       }
 
+      // Resolve what is already in Files, then upload only what is left. Both
+      // happen before the upsert loop so a row never half-writes — an entry
+      // pointing at a file that failed to upload would be worse than an entry
+      // not written at all.
+      const { files, uploads } = await resolveExistingFiles(
+        admin,
+        definition,
+        records,
+      );
+
+      if (uploads.length > MAX_NEW_FILES) {
+        return {
+          step: "error",
+          message: `That file introduces ${uploads.length} new images. Import at most ${MAX_NEW_FILES} at a time.`,
+        } as const;
+      }
+
+      let uploaded = 0;
+      if (uploads.length) {
+        const createdFiles = await createFilesFromUrls(admin, uploads);
+        for (const [url, id] of createdFiles.resolved) files.set(url, id);
+        uploaded = createdFiles.resolved.size;
+        failures.push(...createdFiles.errors.map((error) => `Image: ${error}`));
+      }
+
       // Re-plan against the store as it is *now* rather than trusting the plan
       // the browser is echoing back: the data may have changed since it was
       // shown, and it arrived from the client where it could have been edited.
@@ -146,6 +269,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         definition,
         records,
         await getEntries(admin, type),
+        { files },
       );
 
       let created = 0;
@@ -161,6 +285,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           continue;
         }
 
+        // An upload that failed above leaves the cell holding a URL. Writing it
+        // would put a bare URL in a file reference field, so the row is skipped
+        // and reported instead — the error explaining why is already in
+        // `failures` from `createFilesFromUrls`.
+        if (row.pendingUploads.length) {
+          failures.push(
+            `Row ${row.rowNumber} (${row.handle}): skipped — ${row.pendingUploads.length} image(s) could not be uploaded.`,
+          );
+          continue;
+        }
+
         const result = await upsertEntry(admin, type, row.handle, row.values);
         if (!result.ok) {
           failures.push(
@@ -173,7 +308,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
       }
 
-      return { step: "applied", created, updated, failures } as const;
+      return { step: "applied", created, updated, uploaded, failures } as const;
     }
 
     return { step: "error", message: "Unknown action." } as const;
@@ -186,6 +321,76 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     } as const;
   }
 };
+
+// Decorative dark-terminal backdrop. It is painted by a fixed layer sitting at
+// z-index -1, which is only visible if the body behind it is transparent — so
+// the page tints the body while it is mounted and puts it back on the way out.
+// Nothing here is interactive, and it is hidden from assistive tech.
+function HackBackdrop() {
+  useEffect(() => {
+    document.body.classList.add(styles.hackBody);
+    return () => document.body.classList.remove(styles.hackBody);
+  }, []);
+
+  return (
+    <div className={styles.backdrop} aria-hidden="true">
+      <div className={styles.grid} />
+      <div className={styles.sweep} />
+      <div className={styles.scanlines} />
+      <img className={styles.watermarkTux} src="/tux.svg" alt="" />
+    </div>
+  );
+}
+
+// Larry Ewing's Tux is free to use provided he and The GIMP are acknowledged,
+// which is what the credit line at the bottom of this block is for. See
+// `public/tux.LICENSE.txt`.
+function TerminalHero({ definitions }: { definitions: number }) {
+  return (
+    <div className={styles.terminal}>
+      <div className={styles.terminalBar}>
+        <span className={`${styles.dot} ${styles.dotRed}`} />
+        <span className={`${styles.dot} ${styles.dotAmber}`} />
+        <span className={`${styles.dot} ${styles.dotGreen}`} />
+        <span className={styles.terminalTitle}>
+          solorak@shopify: ~/metaobjects — zsh
+        </span>
+      </div>
+
+      <div className={styles.terminalBody}>
+        <img
+          className={styles.heroTux}
+          src="/tux.svg"
+          alt="Tux, the Linux penguin"
+        />
+        <div className={styles.termLines}>
+          <p className={styles.termLine}>
+            <span className={styles.prompt}>$</span> metaobjects --status
+          </p>
+          <p className={styles.termLine}>
+            <span className={styles.muted}>definitions found:</span>{" "}
+            <span className={styles.accent}>{definitions}</span>
+          </p>
+          <p className={styles.termLine}>
+            <span className={styles.muted}>pipeline:</span>{" "}
+            <span className={styles.accent}>csv</span> →{" "}
+            <span className={styles.accent}>plan</span> →{" "}
+            <span className={styles.accent}>apply</span>
+          </p>
+          <p className={styles.termLine}>
+            <span className={styles.prompt}>$</span>
+            <span className={styles.cursor} />
+          </p>
+        </div>
+      </div>
+
+      <p className={styles.credit}>
+        Tux by Larry Ewing (lewing@isc.tamu.edu) and The GIMP, vectored by Simon
+        Budig and Garrett LeSage.
+      </p>
+    </div>
+  );
+}
 
 export default function ImportExportPage() {
   const { definitions } = useLoaderData<typeof loader>();
@@ -221,6 +426,12 @@ export default function ImportExportPage() {
 
   return (
     <s-page heading="Metaobjects import & export">
+      <HackBackdrop />
+
+      <s-section>
+        <TerminalHero definitions={definitions.length} />
+      </s-section>
+
       <s-section heading="Export">
         {definitions.length === 0 ? (
           <s-paragraph>
@@ -300,6 +511,16 @@ export default function ImportExportPage() {
               creates the schema instead.
             </s-paragraph>
 
+            <s-paragraph>
+              A <strong>file</strong> field accepts an image URL as well as the{" "}
+              <s-text>gid://</s-text> value an export writes. Any URL is pulled
+              into Content &rarr; Files and linked to the entry, so a sheet made
+              by hand needs no uploading first. Mixing the two in one file is
+              fine &mdash; a cell that already holds a gid is left exactly as it
+              is. Link directly to the image, and separate several with{" "}
+              <s-text>;</s-text> on a list field.
+            </s-paragraph>
+
             <s-select
               label="Import entries into"
               name="type"
@@ -359,7 +580,28 @@ export default function ImportExportPage() {
                   {data.plan.counts.error} with errors
                 </s-badge>
               )}
+              {data.plan.pendingUploads.length > 0 && (
+                <s-badge tone="info">
+                  {data.plan.pendingUploads.length} image(s) to upload
+                </s-badge>
+              )}
+              {data.plan.reusedFiles > 0 && (
+                <s-badge tone="neutral">
+                  {data.plan.reusedFiles} image(s) already in Files
+                </s-badge>
+              )}
             </s-stack>
+
+            {data.plan.pendingUploads.length > 0 && (
+              <s-banner tone="info">
+                <s-paragraph>
+                  {data.plan.pendingUploads.length} image URL(s) will be pulled
+                  into Content &rarr; Files and linked to their entries. Images
+                  already uploaded by an earlier run are reused, so running this
+                  file again will not create copies.
+                </s-paragraph>
+              </s-banner>
+            )}
 
             {data.plan.unknownColumns.length > 0 && (
               <s-banner tone="warning">
@@ -488,6 +730,8 @@ export default function ImportExportPage() {
               <s-paragraph>
                 {data.created} created, {data.updated} updated,{" "}
                 {data.failures.length} failed.
+                {data.uploaded > 0 &&
+                  ` ${data.uploaded} image(s) uploaded to Files — Shopify finishes processing them a few seconds after this, so one may briefly show as a placeholder in the admin.`}
               </s-paragraph>
             </s-banner>
 
