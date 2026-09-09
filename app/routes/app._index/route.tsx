@@ -428,9 +428,10 @@ export default function ImportExportPage() {
     <s-page heading="Metaobjects import & export">
       <HackBackdrop />
 
-      <s-section>
-        <TerminalHero definitions={definitions.length} />
-      </s-section>
+      {/* Page level, not inside an `s-section` — `s-page` only reserves named
+          slots for the title bar, so a plain child lands in the body slot and
+          the banner spans the page instead of sitting in a card. */}
+      <TerminalHero definitions={definitions.length} />
 
       <s-section heading="Export">
         {definitions.length === 0 ? (
