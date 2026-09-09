@@ -342,56 +342,6 @@ function HackBackdrop() {
   );
 }
 
-// Larry Ewing's Tux is free to use provided he and The GIMP are acknowledged,
-// which is what the credit line at the bottom of this block is for. See
-// `public/tux.LICENSE.txt`.
-function TerminalHero({ definitions }: { definitions: number }) {
-  return (
-    <div className={styles.terminal}>
-      <div className={styles.terminalBar}>
-        <span className={`${styles.dot} ${styles.dotRed}`} />
-        <span className={`${styles.dot} ${styles.dotAmber}`} />
-        <span className={`${styles.dot} ${styles.dotGreen}`} />
-        <span className={styles.terminalTitle}>
-          solorak@shopify: ~/metaobjects — zsh
-        </span>
-      </div>
-
-      <div className={styles.terminalBody}>
-        <img
-          className={styles.heroTux}
-          src="/tux.svg"
-          alt="Tux, the Linux penguin"
-        />
-        <div className={styles.termLines}>
-          <p className={styles.termLine}>
-            <span className={styles.prompt}>$</span> metaobjects --status
-          </p>
-          <p className={styles.termLine}>
-            <span className={styles.muted}>definitions found:</span>{" "}
-            <span className={styles.accent}>{definitions}</span>
-          </p>
-          <p className={styles.termLine}>
-            <span className={styles.muted}>pipeline:</span>{" "}
-            <span className={styles.accent}>csv</span> →{" "}
-            <span className={styles.accent}>plan</span> →{" "}
-            <span className={styles.accent}>apply</span>
-          </p>
-          <p className={styles.termLine}>
-            <span className={styles.prompt}>$</span>
-            <span className={styles.cursor} />
-          </p>
-        </div>
-      </div>
-
-      <p className={styles.credit}>
-        Tux by Larry Ewing (lewing@isc.tamu.edu) and The GIMP, vectored by Simon
-        Budig and Garrett LeSage.
-      </p>
-    </div>
-  );
-}
-
 export default function ImportExportPage() {
   const { definitions } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
@@ -427,11 +377,6 @@ export default function ImportExportPage() {
   return (
     <s-page heading="Metaobjects import & export">
       <HackBackdrop />
-
-      {/* Page level, not inside an `s-section` — `s-page` only reserves named
-          slots for the title bar, so a plain child lands in the body slot and
-          the banner spans the page instead of sitting in a card. */}
-      <TerminalHero definitions={definitions.length} />
 
       <s-section heading="Export">
         {definitions.length === 0 ? (

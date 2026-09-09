@@ -1,73 +1,281 @@
+/* Public login page (not embedded in the admin), so this route owns its whole
+   look — no Polaris shadow DOM to work around. Same hackish dark terminal
+   treatment as the metaobjects page, turned up: here Tux is the subject rather
+   than a watermark. */
+
 .index {
-  align-items: center;
+  position: relative;
   display: flex;
+  align-items: center;
   justify-content: center;
-  height: 100%;
+  min-height: 100vh;
   width: 100%;
-  text-align: center;
-  padding: 1rem;
+  padding: 1.5rem;
+  box-sizing: border-box;
+  overflow: hidden;
+  background:
+    radial-gradient(
+      70rem 40rem at 12% -10%,
+      rgba(0, 255, 148, 0.16),
+      transparent 65%
+    ),
+    radial-gradient(
+      55rem 35rem at 105% 20%,
+      rgba(0, 176, 255, 0.14),
+      transparent 60%
+    ),
+    radial-gradient(
+      45rem 45rem at 50% 115%,
+      rgba(255, 146, 30, 0.1),
+      transparent 60%
+    ),
+    #04070a;
+  color: #b8ffd9;
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas,
+    monospace;
 }
 
-.heading,
-.text {
-  padding: 0;
-  margin: 0;
+/* --- backdrop layers --------------------------------------------------- */
+
+.grid,
+.scanlines,
+.sweep {
+  position: absolute;
+  pointer-events: none;
 }
 
-.text {
-  font-size: 1.2rem;
-  padding-bottom: 2rem;
+.grid {
+  inset: -2px;
+  background-image:
+    linear-gradient(rgba(0, 255, 148, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 255, 148, 0.055) 1px, transparent 1px);
+  background-size: 2.5rem 2.5rem;
+  mask-image: radial-gradient(120% 100% at 50% 0%, #000 35%, transparent 85%);
+  -webkit-mask-image: radial-gradient(
+    120% 100% at 50% 0%,
+    #000 35%,
+    transparent 85%
+  );
 }
+
+.scanlines {
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.28) 0 1px,
+    transparent 1px 3px
+  );
+  opacity: 0.5;
+}
+
+.sweep {
+  left: 0;
+  right: 0;
+  height: 22rem;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgba(0, 255, 148, 0.07),
+    transparent
+  );
+  animation: sweep 9s linear infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateY(-24rem);
+  }
+  to {
+    transform: translateY(105vh);
+  }
+}
+
+/* --- terminal window --------------------------------------------------- */
 
 .content {
-  display: grid;
-  gap: 2rem;
+  --edge: rgba(0, 255, 148, 0.28);
+
+  position: relative;
+  width: 100%;
+  max-width: 32rem;
+  border: 1px solid var(--edge);
+  border-radius: 0.75rem;
+  background: rgba(4, 10, 8, 0.92);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 1.5rem 3rem rgba(0, 0, 0, 0.55);
+  overflow: hidden;
 }
 
-.form {
+.bar {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  margin: 0 auto;
-  gap: 1rem;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--edge);
+  background: rgba(0, 255, 148, 0.06);
+}
+
+.dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  flex: none;
+}
+
+.dotRed {
+  background: #ff5f57;
+}
+.dotAmber {
+  background: #febc2e;
+}
+.dotGreen {
+  background: #28c840;
+}
+
+.barTitle {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: #6fd6a3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.body {
+  display: grid;
+  justify-items: center;
+  gap: 1.25rem;
+  padding: 2rem 1.75rem;
+}
+
+.tux {
+  width: 7.5rem;
+  filter: drop-shadow(0 0 1.1rem rgba(0, 255, 148, 0.55));
+  animation: bob 5s ease-in-out infinite;
+}
+
+@keyframes bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.4rem);
+  }
+}
+
+.heading {
+  margin: 0;
+  text-align: center;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #e6fff2;
+}
+
+.prompt {
+  color: #00ff94;
+}
+
+/* Blinking block cursor trailing the heading. */
+.cursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  margin-left: 0.15em;
+  vertical-align: text-bottom;
+  background: #00ff94;
+  animation: blink 1.1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* --- shop domain form -------------------------------------------------- */
+
+.form {
+  display: grid;
+  gap: 0.9rem;
+  width: 100%;
 }
 
 .label {
   display: grid;
-  gap: 0.2rem;
-  max-width: 20rem;
+  gap: 0.35rem;
+  font-size: 0.8125rem;
   text-align: left;
-  font-size: 1rem;
+}
+
+.labelText {
+  color: #6fd6a3;
+  letter-spacing: 0.04em;
+}
+
+.hint {
+  font-size: 0.75rem;
+  color: #4f8f72;
 }
 
 .input {
-  padding: 0.4rem;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid rgba(0, 255, 148, 0.35);
+  border-radius: 0.4rem;
+  background: rgba(0, 20, 12, 0.85);
+  font: inherit;
+  color: #d7ffe9;
+}
+
+.input::placeholder {
+  color: #3f7a5e;
+}
+
+.input:focus-visible {
+  outline: 2px solid #00ff94;
+  outline-offset: 1px;
+  border-color: transparent;
 }
 
 .button {
-  padding: 0.4rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid #00ff94;
+  border-radius: 0.4rem;
+  background: rgba(0, 255, 148, 0.14);
+  font: inherit;
+  font-weight: 600;
+  color: #b8ffd9;
+  cursor: pointer;
 }
 
-.list {
-  list-style: none;
-  padding: 0;
-  padding-top: 3rem;
+.button:hover {
+  background: rgba(0, 255, 148, 0.24);
+}
+
+.button:focus-visible {
+  outline: 2px solid #00ff94;
+  outline-offset: 2px;
+}
+
+/* Larry Ewing's terms ask that he and The GIMP be acknowledged. */
+.credit {
   margin: 0;
-  display: flex;
-  gap: 2rem;
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  text-align: center;
+  color: #4f8f72;
 }
 
-.list > li {
-  max-width: 20rem;
-  text-align: left;
-}
-
-@media only screen and (max-width: 50rem) {
-  .list {
-    display: block;
-  }
-
-  .list > li {
-    padding-bottom: 1rem;
+/* Decoration only — hold it still when the reader asks for that. */
+@media (prefers-reduced-motion: reduce) {
+  .sweep,
+  .tux,
+  .cursor {
+    animation: none;
   }
 }
