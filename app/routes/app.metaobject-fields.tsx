@@ -11,9 +11,12 @@ import {
   createMetafieldDefinition,
   listMetafieldDefinitions,
 } from "../lib/product-metafields.server";
+import { parseCsv, rowsToRecords } from "../lib/csv";
 import {
   DEFAULT_METAFIELD_NAMESPACE,
   FIELD_TYPE_GROUPS,
+  isMetafieldDefinitionCsv,
+  parseMetafieldDefinitions,
   isValidFieldType,
   planDefinitionForm,
   suggestKey,
@@ -64,6 +67,52 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
 
   try {
+    // --- Create metafield definitions from a CSV ----------------------------
+    if (formData.get("intent") === "metafields") {
+      const file = formData.get("file");
+      if (!(file instanceof File) || file.size === 0) {
+        return {
+          step: "error",
+          message: "Choose the metafield definitions CSV first.",
+          errors: [],
+        } as const;
+      }
+
+      const rows = parseCsv(await file.text());
+      if (!isMetafieldDefinitionCsv(rows[0] ?? [])) {
+        return {
+          step: "error",
+          message:
+            "That file is not a metafield definition CSV — it needs namespace, key and type columns.",
+          errors: [`It has: ${(rows[0] ?? []).join(", ")}`],
+        } as const;
+      }
+
+      const parsed = parseMetafieldDefinitions(rowsToRecords(rows));
+      if (!parsed.ok) {
+        return {
+          step: "error",
+          message: "That file has problems.",
+          errors: parsed.errors,
+        } as const;
+      }
+
+      let created = 0;
+      const failures: string[] = [];
+
+      for (const definition of parsed.definitions) {
+        const result = await createMetafieldDefinition(admin, definition);
+        if (result.ok) created++;
+        else {
+          failures.push(
+            `${definition.namespace}.${definition.key}: ${result.errors.join("; ")}`,
+          );
+        }
+      }
+
+      return { step: "linked", created, failures } as const;
+    }
+
     // --- Link metaobject definitions onto the product page ------------------
     if (formData.get("intent") === "link") {
       const namespace =
@@ -262,6 +311,48 @@ export default function MetaobjectFieldsPage() {
             </div>
           </s-stack>
         )}
+      </s-section>
+
+      <s-section heading="Create metafields from a CSV">
+        <fetcher.Form method="post" encType="multipart/form-data">
+          <input type="hidden" name="intent" value="metafields" />
+          <s-stack direction="block" gap="base">
+            <s-paragraph>
+              Upload <s-text>product-metafield-definitions.csv</s-text> from the
+              Oscar export. It creates the definitions — short description,
+              usage, ingredients, warnings — as pinned rich text fields, so they
+              appear in the <strong>Product metafields</strong> card on every
+              product.
+            </s-paragraph>
+            <s-paragraph>
+              Then import <s-text>product-metafields.csv</s-text> on the{" "}
+              <s-link href="/app/product-update">Update products</s-link> page to
+              fill them in. The columns are already named the way that importer
+              expects, so there is nothing to map.
+            </s-paragraph>
+
+            <label className={styles.fileField}>
+              <span className={styles.fileLabel}>Definitions CSV</span>
+              <input
+                className={styles.fileInput}
+                type="file"
+                name="file"
+                accept=".csv,text/csv"
+                required
+              />
+            </label>
+
+            <div className={styles.actions}>
+              <s-button
+                type="submit"
+                variant="primary"
+                {...(busy ? { loading: true } : {})}
+              >
+                Create metafields
+              </s-button>
+            </div>
+          </s-stack>
+        </fetcher.Form>
       </s-section>
 
       <s-section heading="Show these on the product page">

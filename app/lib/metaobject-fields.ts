@@ -162,6 +162,93 @@ export function suggestReferenceMetafields(
   }));
 }
 
+/** Columns of the metafield definition CSV the Oscar side exports. */
+export const METAFIELD_DEFINITION_COLUMNS = [
+  "owner_type",
+  "namespace",
+  "key",
+  "name",
+  "type",
+  "description",
+  "pin",
+] as const;
+
+export function isMetafieldDefinitionCsv(headers: string[]): boolean {
+  return (
+    headers.includes("namespace") &&
+    headers.includes("key") &&
+    headers.includes("type")
+  );
+}
+
+export type MetafieldDefinitionDraft = {
+  ownerType: "PRODUCT" | "PRODUCTVARIANT";
+  namespace: string;
+  key: string;
+  name: string;
+  type: string;
+  description: string | null;
+  pin: boolean;
+};
+
+/**
+ * Read a metafield definition CSV.
+ *
+ * Errors are collected rather than thrown on the first: a file describing four
+ * definitions with two mistakes should report both, not send the reader round
+ * the loop twice.
+ */
+export function parseMetafieldDefinitions(
+  records: Record<string, string>[],
+):
+  | { ok: true; definitions: MetafieldDefinitionDraft[] }
+  | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  const definitions: MetafieldDefinitionDraft[] = [];
+
+  records.forEach((record, index) => {
+    // +2: one for the header row, one because spreadsheets number from 1.
+    const row = `Row ${index + 2}`;
+    const namespace = (record.namespace ?? "").trim();
+    const key = (record.key ?? "").trim();
+    const type = (record.type ?? "").trim();
+
+    if (!namespace || !key || !type) {
+      errors.push(`${row}: namespace, key and type are all required.`);
+      return;
+    }
+
+    const column = `${namespace}.${key}`;
+    if (seen.has(column)) {
+      errors.push(`${row}: "${column}" appears twice.`);
+      return;
+    }
+    seen.add(column);
+
+    const ownerType =
+      (record.owner_type ?? "").trim().toUpperCase() === "PRODUCTVARIANT"
+        ? "PRODUCTVARIANT"
+        : "PRODUCT";
+
+    definitions.push({
+      ownerType,
+      namespace,
+      key,
+      name: (record.name ?? "").trim() || key,
+      type,
+      description: (record.description ?? "").trim() || null,
+      // Pinned unless the file says otherwise. An unpinned definition never
+      // appears in the product page's metafields card, which looks exactly
+      // like the import having silently done nothing.
+      pin: (record.pin ?? "").trim().toLowerCase() !== "false",
+    });
+  });
+
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, definitions };
+}
+
 export type FieldDraft = {
   key: string;
   name: string;
