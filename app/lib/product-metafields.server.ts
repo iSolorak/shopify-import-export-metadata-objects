@@ -262,6 +262,10 @@ export async function createMetafieldDefinition(
       name: definition.name,
       type: definition.type,
       pin: definition.pin ?? true,
+      // Without this the value exists in the admin but the storefront cannot
+      // read it, so a theme has nothing to render — which looks like the
+      // import having done nothing.
+      access: { storefront: "PUBLIC_READ" },
       ...(definition.description ? { description: definition.description } : {}),
       // The validation is what lets a CSV cell hold a bare handle instead of
       // "type:handle" — the importer reads it back to learn which definition
