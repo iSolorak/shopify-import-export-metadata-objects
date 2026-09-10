@@ -8,10 +8,16 @@ import {
   listDefinitions,
 } from "../lib/metaobjects.server";
 import {
+  createMetafieldDefinition,
+  listMetafieldDefinitions,
+} from "../lib/product-metafields.server";
+import {
+  DEFAULT_METAFIELD_NAMESPACE,
   FIELD_TYPE_GROUPS,
   isValidFieldType,
   planDefinitionForm,
   suggestKey,
+  suggestReferenceMetafields,
   type DefinitionDraft,
 } from "../lib/metaobject-fields";
 import styles from "./app._index/styles.module.css";
@@ -31,6 +37,7 @@ import styles from "./app._index/styles.module.css";
 
 type ActionData =
   | { step: "created"; type: string; name: string; fields: number }
+  | { step: "linked"; created: number; failures: string[] }
   | { step: "error"; message: string; errors: string[] };
 
 /** Fields per definition. Shopify's own ceiling, quoted back as the limit. */
@@ -39,7 +46,17 @@ const MAX_FIELDS = 40;
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
 
-  return { definitions: await listDefinitions(admin) };
+  const [definitions, productMetafields] = await Promise.all([
+    listDefinitions(admin),
+    listMetafieldDefinitions(admin, "PRODUCT"),
+  ]);
+
+  return {
+    definitions,
+    // Paired here rather than in the component so the "already linked" state is
+    // decided by the store, not by what the page happens to have rendered.
+    references: suggestReferenceMetafields(definitions, productMetafields),
+  };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -47,6 +64,62 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
 
   try {
+    // --- Link metaobject definitions onto the product page ------------------
+    if (formData.get("intent") === "link") {
+      const namespace =
+        String(formData.get("namespace") ?? "").trim() ||
+        DEFAULT_METAFIELD_NAMESPACE;
+      const chosen = formData.getAll("link").map(String);
+
+      if (!chosen.length) {
+        return {
+          step: "error",
+          message: "Choose at least one metaobject to link.",
+          errors: [],
+        } as const;
+      }
+
+      const definitions = await listDefinitions(admin);
+      const suggestions = suggestReferenceMetafields(
+        definitions,
+        await listMetafieldDefinitions(admin, "PRODUCT"),
+        {
+          namespace,
+          listTypes: formData.getAll("list").map(String),
+        },
+      );
+
+      let created = 0;
+      const failures: string[] = [];
+
+      // Sequential: these share the mutation rate limit, and six of them is
+      // not worth the risk of a burst being throttled into failures that look
+      // like data errors.
+      for (const suggestion of suggestions) {
+        if (!chosen.includes(suggestion.metaobjectType)) continue;
+        if (suggestion.existing) continue;
+
+        const result = await createMetafieldDefinition(admin, {
+          ownerType: "PRODUCT",
+          namespace: suggestion.namespace,
+          key: suggestion.key,
+          name: suggestion.name,
+          type: suggestion.type,
+          metaobjectDefinitionId: suggestion.metaobjectDefinitionId,
+          pin: true,
+        });
+
+        if (result.ok) created++;
+        else {
+          failures.push(
+            `${suggestion.namespace}.${suggestion.key}: ${result.errors.join("; ")}`,
+          );
+        }
+      }
+
+      return { step: "linked", created, failures } as const;
+    }
+
     const draft: DefinitionDraft = {
       type: String(formData.get("type") ?? ""),
       name: String(formData.get("name") ?? ""),
@@ -106,7 +179,7 @@ const BLANK_ROW: FieldRow = {
 };
 
 export default function MetaobjectFieldsPage() {
-  const { definitions } = useLoaderData<typeof loader>();
+  const { definitions, references } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
   const busy = fetcher.state !== "idle";
   const data = fetcher.data;
@@ -188,6 +261,95 @@ export default function MetaobjectFieldsPage() {
               </s-table>
             </div>
           </s-stack>
+        )}
+      </s-section>
+
+      <s-section heading="Show these on the product page">
+        {references.length === 0 ? (
+          <s-paragraph>
+            Create a metaobject definition first — then it can be linked to
+            products from here.
+          </s-paragraph>
+        ) : (
+          <fetcher.Form method="post">
+            <input type="hidden" name="intent" value="link" />
+            <s-stack direction="block" gap="base">
+              <s-paragraph>
+                A metaobject definition does not appear on a product by itself.
+                What puts it in the <strong>Product metafields</strong> card is a
+                metafield that references it — pinned, so the admin shows it.
+                Entries are then chosen per product, and the importer fills them
+                in by handle.
+              </s-paragraph>
+
+              <s-text-field
+                label="Namespace"
+                name="namespace"
+                value={DEFAULT_METAFIELD_NAMESPACE}
+                details="Groups the metafields together. Shopify's own convention for merchant-owned data is “custom”."
+              />
+
+              <div className={styles.tableScroll}>
+                <s-table>
+                  <s-table-header-row>
+                    <s-table-header>Link</s-table-header>
+                    <s-table-header>Metaobject</s-table-header>
+                    <s-table-header>Metafield</s-table-header>
+                    <s-table-header>Several per product</s-table-header>
+                    <s-table-header>Status</s-table-header>
+                  </s-table-header-row>
+                  <s-table-body>
+                    {references.map((reference) => (
+                      <s-table-row key={reference.metaobjectType}>
+                        <s-table-cell>
+                          <s-checkbox
+                            label={`Link ${reference.metaobjectType}`}
+                            labelAccessibilityVisibility="exclusive"
+                            name="link"
+                            value={reference.metaobjectType}
+                            {...(reference.existing ? { disabled: true } : {})}
+                          />
+                        </s-table-cell>
+                        <s-table-cell>{reference.metaobjectType}</s-table-cell>
+                        <s-table-cell>
+                          {reference.existing ?? `${reference.namespace}.${reference.key}`}
+                        </s-table-cell>
+                        <s-table-cell>
+                          {/* Claims are many per product; usage or ingredients
+                              are one. A list type cannot be changed later
+                              without recreating the definition. */}
+                          <s-checkbox
+                            label={`${reference.metaobjectType} allows several`}
+                            labelAccessibilityVisibility="exclusive"
+                            name="list"
+                            value={reference.metaobjectType}
+                            {...(reference.existing ? { disabled: true } : {})}
+                          />
+                        </s-table-cell>
+                        <s-table-cell>
+                          {reference.existing ? (
+                            <s-badge tone="success">linked</s-badge>
+                          ) : (
+                            <s-badge tone="neutral">not linked</s-badge>
+                          )}
+                        </s-table-cell>
+                      </s-table-row>
+                    ))}
+                  </s-table-body>
+                </s-table>
+              </div>
+
+              <div className={styles.actions}>
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  {...(busy ? { loading: true } : {})}
+                >
+                  Create metafields
+                </s-button>
+              </div>
+            </s-stack>
+          </fetcher.Form>
         )}
       </s-section>
 
@@ -370,6 +532,27 @@ export default function MetaobjectFieldsPage() {
               <s-unordered-list>
                 {data.errors.map((error) => (
                   <s-list-item key={error}>{error}</s-list-item>
+                ))}
+              </s-unordered-list>
+            )}
+          </s-stack>
+        </s-section>
+      )}
+
+      {data?.step === "linked" && (
+        <s-section heading="Product metafields">
+          <s-stack direction="block" gap="base">
+            <s-banner tone={data.failures.length ? "warning" : "success"}>
+              <s-paragraph>
+                {data.created} metafield(s) created and pinned.{" "}
+                {data.created > 0 &&
+                  "They now appear in the Product metafields card on every product."}
+              </s-paragraph>
+            </s-banner>
+            {data.failures.length > 0 && (
+              <s-unordered-list>
+                {data.failures.map((failure) => (
+                  <s-list-item key={failure}>{failure}</s-list-item>
                 ))}
               </s-unordered-list>
             )}

@@ -215,6 +215,75 @@ export function listRichTextDefinitions(
   return listMetafieldDefinitions(admin, "PRODUCT", { type: RICH_TEXT_TYPE });
 }
 
+const METAFIELD_DEFINITION_CREATE = `#graphql
+  mutation CreateReferenceMetafieldDefinition(
+    $definition: MetafieldDefinitionInput!
+  ) {
+    metafieldDefinitionCreate(definition: $definition) {
+      createdDefinition { id name namespace key type { name } }
+      userErrors { field message code }
+    }
+  }
+`;
+
+/**
+ * Create a metafield definition on an owner.
+ *
+ * `pin` is the field that matters and the one that is easy to miss: an unpinned
+ * definition exists, and can be written to, but does not appear in the
+ * "Product metafields" card on the product page. A definition nobody can see is
+ * indistinguishable from one that was never created, so this pins by default.
+ *
+ * Returns user errors rather than throwing, matching the other mutations here —
+ * creating six of these should report the one that clashed, not abandon the
+ * five that would have worked.
+ */
+export async function createMetafieldDefinition(
+  admin: Admin,
+  definition: {
+    ownerType: MetafieldOwner;
+    namespace: string;
+    key: string;
+    name: string;
+    type: string;
+    description?: string | null;
+    /** Restricts a reference type to one metaobject definition. */
+    metaobjectDefinitionId?: string | null;
+    pin?: boolean;
+  },
+): Promise<{ ok: boolean; errors: string[] }> {
+  const data = await query<{
+    metafieldDefinitionCreate: { userErrors: UserError[] };
+  }>(admin, METAFIELD_DEFINITION_CREATE, {
+    definition: {
+      ownerType: definition.ownerType,
+      namespace: definition.namespace,
+      key: definition.key,
+      name: definition.name,
+      type: definition.type,
+      pin: definition.pin ?? true,
+      ...(definition.description ? { description: definition.description } : {}),
+      // The validation is what lets a CSV cell hold a bare handle instead of
+      // "type:handle" — the importer reads it back to learn which definition
+      // the handles belong to.
+      ...(definition.metaobjectDefinitionId
+        ? {
+            validations: [
+              {
+                name: "metaobject_definition_id",
+                value: definition.metaobjectDefinitionId,
+              },
+            ],
+          }
+        : {}),
+    },
+  });
+
+  const { userErrors } = data.metafieldDefinitionCreate;
+
+  return { ok: userErrors.length === 0, errors: formatUserErrors(userErrors) };
+}
+
 // ---------------------------------------------------------------------------
 // Reading product values
 // ---------------------------------------------------------------------------

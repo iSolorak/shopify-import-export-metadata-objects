@@ -548,14 +548,41 @@ export default function ImportExportPage() {
               </s-banner>
             )}
 
-            {data.plan.unknownColumns.length > 0 && (
-              <s-banner tone="warning">
-                <s-paragraph>
-                  Ignored column(s) with no matching field:{" "}
-                  {data.plan.unknownColumns.join(", ")}
-                </s-paragraph>
+            {/* Named before the other warnings because it is the cause of
+                them: when nothing lines up, the per-row errors below are all
+                the same error described from the wrong end. */}
+            {data.plan.definitionMismatch && (
+              <s-banner tone="critical">
+                <s-stack direction="block" gap="small-300">
+                  <s-paragraph>
+                    This file does not match <s-text>{data.plan.type}</s-text>.
+                    None of its columns are fields of that definition, so every
+                    row would fail.
+                  </s-paragraph>
+                  <s-paragraph>
+                    The file has: {data.plan.unknownColumns.join(", ") || "—"}.
+                  </s-paragraph>
+                  <s-paragraph>
+                    <s-text>{data.plan.type}</s-text> has:{" "}
+                    {data.plan.definitionFieldKeys.join(", ") || "no fields"}.
+                  </s-paragraph>
+                  <s-paragraph>
+                    Either pick a different type above, or create the definition
+                    this file was built for — import its definition CSV first.
+                  </s-paragraph>
+                </s-stack>
               </s-banner>
             )}
+
+            {data.plan.unknownColumns.length > 0 &&
+              !data.plan.definitionMismatch && (
+                <s-banner tone="warning">
+                  <s-paragraph>
+                    Ignored column(s) with no matching field:{" "}
+                    {data.plan.unknownColumns.join(", ")}
+                  </s-paragraph>
+                </s-banner>
+              )}
 
             {data.plan.missingRequiredColumns.length > 0 && (
               <s-banner tone="warning">

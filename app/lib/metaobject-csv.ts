@@ -125,6 +125,20 @@ export type ImportPlan = {
   pendingUploads: string[];
   /** How many URL cells resolved to a file already in the store. */
   reusedFiles: number;
+  /**
+   * The chosen definition's field keys, so a mismatch can be described rather
+   * than merely detected.
+   */
+  definitionFieldKeys: string[];
+  /**
+   * No column in the file maps to a field of the chosen definition.
+   *
+   * Almost always the wrong definition picked, or one built by hand with
+   * different keys. Worth its own signal because the symptom otherwise appears
+   * as a quiet "ignored columns" note beside hundreds of identical row errors,
+   * which describes the consequence rather than the cause.
+   */
+  definitionMismatch: boolean;
 };
 
 /**
@@ -370,6 +384,10 @@ export function planEntryImport(
     missingRequiredColumns,
     pendingUploads: [...allPending],
     reusedFiles,
+    definitionFieldKeys: fieldKeys,
+    // Only a mismatch if the file actually offered something to match. A file
+    // of nothing but `handle` is empty, not misdirected.
+    definitionMismatch: writableColumns.length === 0 && unknownColumns.length > 0,
   };
 }
 

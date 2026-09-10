@@ -87,6 +87,81 @@ export function suggestKey(name: string): string {
     .slice(0, 60);
 }
 
+// ---------------------------------------------------------------------------
+// Reference metafields
+// ---------------------------------------------------------------------------
+
+/**
+ * The namespace a merchant-owned metafield belongs in by default.
+ *
+ * `custom` is Shopify's own convention for definitions the merchant controls,
+ * and it is what the admin suggests. Reserved prefixes would be refused.
+ */
+export const DEFAULT_METAFIELD_NAMESPACE = "custom";
+
+export type ReferenceMetafieldSuggestion = {
+  /** The metaobject definition this would point at. */
+  metaobjectDefinitionId: string;
+  metaobjectType: string;
+  /** Proposed metafield identity. */
+  namespace: string;
+  key: string;
+  name: string;
+  /** `metaobject_reference`, or the list form for a many-per-product link. */
+  type: string;
+  /** Set when a product metafield already points at this definition. */
+  existing: string | null;
+};
+
+const REFERENCE_TYPE = "metaobject_reference";
+const LIST_REFERENCE_TYPE = "list.metaobject_reference";
+
+/**
+ * A metaobject definition on its own is invisible on the product page. What
+ * puts it there is a metafield of `metaobject_reference` type, restricted to
+ * that definition and pinned.
+ *
+ * This pairs each metaobject definition with the metafield that would link it,
+ * and says whether one already exists — matched on the definition it points at
+ * rather than on its name, because the name is the merchant's to choose and
+ * two namespaces may hold the same key.
+ */
+export function suggestReferenceMetafields(
+  metaobjectDefinitions: {
+    id: string;
+    type: string;
+    name: string;
+  }[],
+  productMetafields: {
+    column: string;
+    type: string;
+    metaobjectDefinitionId?: string;
+  }[],
+  options: { namespace?: string; listTypes?: Iterable<string> } = {},
+): ReferenceMetafieldSuggestion[] {
+  const namespace = options.namespace?.trim() || DEFAULT_METAFIELD_NAMESPACE;
+  const listTypes = new Set(options.listTypes ?? []);
+
+  const linked = new Map<string, string>();
+  for (const metafield of productMetafields) {
+    if (metafield.metaobjectDefinitionId) {
+      linked.set(metafield.metaobjectDefinitionId, metafield.column);
+    }
+  }
+
+  return metaobjectDefinitions.map((definition) => ({
+    metaobjectDefinitionId: definition.id,
+    metaobjectType: definition.type,
+    namespace,
+    // The metaobject type is already a valid key, and reusing it keeps the two
+    // halves recognisably a pair in the admin.
+    key: suggestKey(definition.type),
+    name: definition.name,
+    type: listTypes.has(definition.type) ? LIST_REFERENCE_TYPE : REFERENCE_TYPE,
+    existing: linked.get(definition.id) ?? null,
+  }));
+}
+
 export type FieldDraft = {
   key: string;
   name: string;
