@@ -40,7 +40,7 @@ import styles from "./app._index/styles.module.css";
 
 type ActionData =
   | { step: "created"; type: string; name: string; fields: number }
-  | { step: "linked"; created: number; failures: string[] }
+  | { step: "linked"; created: number; skipped: string[]; failures: string[] }
   | { step: "error"; message: string; errors: string[] };
 
 /** Fields per definition. Shopify's own ceiling, quoted back as the limit. */
@@ -97,20 +97,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         } as const;
       }
 
+      // What the store already has, so a re-run reports "already there" rather
+      // than five failures. `metafieldDefinitionCreate` refuses to overwrite,
+      // which is the behaviour we want — but it is not an error to have run
+      // this twice.
+      const already = new Set(
+        (await listMetafieldDefinitions(admin, "PRODUCT")).map((d) => d.column),
+      );
+
       let created = 0;
+      const skipped: string[] = [];
       const failures: string[] = [];
 
       for (const definition of parsed.definitions) {
+        const column = `${definition.namespace}.${definition.key}`;
+        if (already.has(column)) {
+          skipped.push(column);
+          continue;
+        }
+
         const result = await createMetafieldDefinition(admin, definition);
         if (result.ok) created++;
-        else {
-          failures.push(
-            `${definition.namespace}.${definition.key}: ${result.errors.join("; ")}`,
-          );
-        }
+        else failures.push(`${column}: ${result.errors.join("; ")}`);
       }
 
-      return { step: "linked", created, failures } as const;
+      return { step: "linked", created, skipped, failures } as const;
     }
 
     // --- Link metaobject definitions onto the product page ------------------
@@ -166,7 +177,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
       }
 
-      return { step: "linked", created, failures } as const;
+      return { step: "linked", created, skipped: [], failures } as const;
     }
 
     const draft: DefinitionDraft = {
@@ -637,7 +648,9 @@ export default function MetaobjectFieldsPage() {
               <s-paragraph>
                 {data.created} metafield(s) created and pinned.{" "}
                 {data.created > 0 &&
-                  "They now appear in the Product metafields card on every product."}
+                  "They now appear in the Product metafields card on every product. "}
+                {data.skipped.length > 0 &&
+                  `${data.skipped.length} already existed and were left alone: ${data.skipped.join(", ")}.`}
               </s-paragraph>
             </s-banner>
             {data.failures.length > 0 && (

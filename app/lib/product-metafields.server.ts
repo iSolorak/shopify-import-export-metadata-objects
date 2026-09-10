@@ -32,6 +32,15 @@ export type RichTextDefinition = {
   /** `namespace.key` — how a metafield is addressed, and the CSV column name. */
   column: string;
   /**
+   * Whether the definition shows in the product page's metafields card.
+   *
+   * An unpinned definition accepts values but is invisible there, which is
+   * indistinguishable from an import having done nothing.
+   */
+  pinned: boolean;
+  /** Whether a theme can read it. Null on API versions that omit the field. */
+  storefrontAccess: string | null;
+  /**
    * For a `metaobject_reference` / `list.metaobject_reference`, the gid of the
    * single metaobject definition its entries must come from.
    *
@@ -112,6 +121,8 @@ const DEFINITIONS = `#graphql
         namespace
         key
         type { name }
+        pinnedPosition
+        access { storefront }
         validations { name value }
       }
     }
@@ -127,6 +138,8 @@ type DefinitionsResponse = {
       namespace: string;
       key: string;
       type: { name: string };
+      pinnedPosition: number | null;
+      access: { storefront: string | null } | null;
       validations: { name: string; value: string | null }[];
     }[];
   };
@@ -189,6 +202,8 @@ export async function listMetafieldDefinitions(
         name: node.name,
         type: node.type.name,
         column: `${node.namespace}.${node.key}`,
+        pinned: node.pinnedPosition != null,
+        storefrontAccess: node.access?.storefront ?? null,
         ...(metaobjectDefinitionIdOf(node.validations)
           ? { metaobjectDefinitionId: metaobjectDefinitionIdOf(node.validations)! }
           : {}),
