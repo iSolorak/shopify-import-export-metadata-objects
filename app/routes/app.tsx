@@ -19,6 +19,7 @@ export default function App() {
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
         <s-link href="/app">Import &amp; export</s-link>
+        <s-link href="/app/metaobject-fields">Metaobject fields</s-link>
         <s-link href="/app/rich-text">Import &amp; export rich text</s-link>
         <s-link href="/app/translations">Translation CSV builder</s-link>
         <s-link href="/app/product-videos">Add product videos</s-link>
