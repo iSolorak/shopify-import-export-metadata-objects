@@ -5,7 +5,18 @@
 
 import { toCsv } from "./csv";
 import { fileUrlsIn, isFileFieldType, toFileValue } from "./file-cells";
+import { cellToRichTextValue, richTextValueToHtml } from "./rich-text";
 import type { Definition, Entry } from "./metaobjects.server";
+
+/**
+ * The metaobject field type whose value is a rich text document.
+ *
+ * Like a file reference, it cannot be written as the merchant wrote it: the
+ * API stores Shopify's JSON document shape, and a CSV cell holds HTML. The
+ * conversion happens here for the same reason file cells resolve here — before
+ * the diff, so an unedited re-import still reports "unchanged".
+ */
+const RICH_TEXT_FIELD_TYPE = "rich_text_field";
 
 /**
  * Column holding the entry handle. It is the upsert key — the handle is what
@@ -210,7 +221,7 @@ export function planEntryImport(
 
     const values: Record<string, string> = {};
     const pendingUploads: string[] = [];
-    let fileError: string | null = null;
+    let cellError: string | null = null;
 
     for (const column of writableColumns) {
       const raw = record[column] ?? "";
@@ -218,14 +229,31 @@ export function planEntryImport(
 
       // A blank cell is left alone here as everywhere else: the required-field
       // check below is what decides whether an empty value is a problem.
-      if (!raw.trim() || !isFileFieldType(fieldType)) {
+      if (!raw.trim()) {
+        values[column] = raw;
+        continue;
+      }
+
+      if (fieldType === RICH_TEXT_FIELD_TYPE) {
+        try {
+          values[column] = cellToRichTextValue(raw);
+        } catch (error) {
+          cellError ??= `${column}: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+          values[column] = raw;
+        }
+        continue;
+      }
+
+      if (!isFileFieldType(fieldType)) {
         values[column] = raw;
         continue;
       }
 
       const converted = toFileValue(fieldType, raw, context.files);
       if (!converted.ok) {
-        fileError ??= `${column}: ${converted.message}`;
+        cellError ??= `${column}: ${converted.message}`;
         values[column] = raw;
         continue;
       }
@@ -248,8 +276,8 @@ export function planEntryImport(
       pendingUploads,
     };
 
-    if (fileError) {
-      return { ...base, action: "error" as const, message: fileError };
+    if (cellError) {
+      return { ...base, action: "error" as const, message: cellError };
     }
 
     if (!handle) {
@@ -289,9 +317,21 @@ export function planEntryImport(
     const current = byHandle.get(handle);
     if (!current) return { ...base, action: "create" as const };
 
-    const changedFields = writableColumns.filter(
-      (column) => (current.values[column] ?? "") !== values[column],
-    );
+    const changedFields = writableColumns.filter((column) => {
+      const stored = current.values[column] ?? "";
+      const incoming = values[column];
+
+      // Rich text is compared as rendered HTML rather than as stored JSON.
+      // Two documents that display identically can differ in key order or in
+      // whitespace-only text nodes, and treating those as a change would
+      // rewrite every entry on every run — the same comparison
+      // `planRichTextImport` makes, for the same reason.
+      if (typeByKey.get(column) === RICH_TEXT_FIELD_TYPE) {
+        return richTextValueToHtml(stored) !== richTextValueToHtml(incoming);
+      }
+
+      return stored !== incoming;
+    });
 
     return changedFields.length
       ? { ...base, action: "update" as const, changedFields }
