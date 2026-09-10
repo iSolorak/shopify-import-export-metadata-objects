@@ -174,6 +174,12 @@ export const STATIC_FIELDS: FieldTarget[] = [
   ...OPTION_FIELDS,
 ];
 
+const OPTION_LINKED_TO_REASON =
+  "Option linkage is part of the product's option setup, not a per-row value. Set it once in the admin; the metaobject handles in Option Value then resolve against it.";
+
+const UNIT_PRICE_REASON =
+  "Unit pricing is per-market compliance data with its own measure/unit rules, and is out of scope for this importer.";
+
 /**
  * Columns read, understood, and deliberately not written — with the reason,
  * because "ignored" without one reads like a bug.
@@ -188,6 +194,22 @@ export const IGNORED_COLUMNS: Record<string, string> = {
     "Per-variant images are not assigned by this importer; images are appended to the product gallery.",
   imageposition:
     "Images are appended in file order; existing media is never reordered.",
+  // The option columns are read for matching (see OPTION_FIELDS) but "Linked
+  // To" describes the option itself — it points an option at the category
+  // metafield whose metaobjects supply its values, which is a structural
+  // change to the product's options rather than a value this importer writes.
+  // The linkage is set up once in the admin; the handles in `Option1 Value`
+  // then resolve against it on every subsequent import.
+  option1linkedto: OPTION_LINKED_TO_REASON,
+  option2linkedto: OPTION_LINKED_TO_REASON,
+  option3linkedto: OPTION_LINKED_TO_REASON,
+  // Unit pricing is a per-market compliance field with its own rules about
+  // which measure/unit pairs are legal, and Shopify rejects mismatched ones on
+  // the whole product. Out of scope for a catalogue importer.
+  unitpricetotalmeasure: UNIT_PRICE_REASON,
+  unitpricetotalmeasureunit: UNIT_PRICE_REASON,
+  unitpricebasemeasure: UNIT_PRICE_REASON,
+  unitpricebasemeasureunit: UNIT_PRICE_REASON,
 };
 
 /** Prefixes of column families exported by Shopify that this app never writes. */

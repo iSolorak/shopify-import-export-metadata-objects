@@ -1,6 +1,6 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "0035a3a7a4b32139c1b552815c23f537"
+client_id = "ab6e8005f4791aae2959d1e31c42bbd9"
 name = "test-app"
 application_url = "https://shopify-app.solorak.xyz"
 embedded = true
@@ -13,7 +13,11 @@ api_version = "2026-10"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products,write_metaobject_definitions,write_metaobjects,read_inventory,write_inventory,read_locations"
+#
+# Kept in step with shopify.app.toml on purpose. `write_files` was missing here,
+# so the metaobject import's image columns — the one feature that uploads to
+# Content → Files — failed on the dev app while working on the live one.
+scopes = "write_products,write_metaobjects,write_metaobject_definitions,read_inventory,write_inventory,read_locations,write_files"
 
 [auth]
 redirect_urls = [
