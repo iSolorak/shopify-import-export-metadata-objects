@@ -315,7 +315,28 @@ export function planEntryImport(
     }
 
     const current = byHandle.get(handle);
-    if (!current) return { ...base, action: "create" as const };
+    if (!current) {
+      // A required field the file has no column for cannot be filled, so the
+      // create is certain to be refused — `metaobjectUpsert` answers
+      // "<Field> can't be blank". Saying so here is the difference between a
+      // plan that is honest and one that promises N creations and then reports
+      // N failures; the warning banner alone was not enough, because the counts
+      // beside it still said the rows would be created.
+      //
+      // Only creates. An update may safely omit a required field: upsert leaves
+      // out what it is not given, so the entry keeps the value it already has.
+      if (missingRequiredColumns.length) {
+        return {
+          ...base,
+          action: "error" as const,
+          message: `Cannot create "${handle}": the definition requires ${missingRequiredColumns
+            .map((key) => `"${key}"`)
+            .join(", ")}, and this file has no such column. Add the column, or make the field optional on the definition.`,
+        };
+      }
+
+      return { ...base, action: "create" as const };
+    }
 
     const changedFields = writableColumns.filter((column) => {
       const stored = current.values[column] ?? "";

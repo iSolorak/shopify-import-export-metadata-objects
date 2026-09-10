@@ -104,6 +104,15 @@ export type DefinitionSummary = {
   name: string;
   entryCount: number;
   fieldKeys: string[];
+  /**
+   * The fields an entry cannot be created without.
+   *
+   * Carried so a page can show them: a required field with no column in the
+   * import file is the difference between an import that works and one that
+   * fails every row with "<Field> can't be blank", and nothing in the admin
+   * surfaces it next to the type you are importing into.
+   */
+  requiredFieldKeys: string[];
 };
 
 type DefinitionsListResponse = {
@@ -115,7 +124,7 @@ type DefinitionsListResponse = {
       type: string;
       displayNameKey: string | null;
       metaobjectsCount: number;
-      fieldDefinitions: { key: string }[];
+      fieldDefinitions: { key: string; required: boolean }[];
     }[];
   };
 };
@@ -143,6 +152,9 @@ export async function listDefinitions(
         name: node.name,
         entryCount: node.metaobjectsCount,
         fieldKeys: node.fieldDefinitions.map((field) => field.key),
+        requiredFieldKeys: node.fieldDefinitions
+          .filter((field) => field.required)
+          .map((field) => field.key),
       });
     }
 

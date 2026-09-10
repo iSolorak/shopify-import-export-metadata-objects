@@ -159,6 +159,7 @@ export default function MetaobjectFieldsPage() {
                   <s-table-header>Type</s-table-header>
                   <s-table-header>Entries</s-table-header>
                   <s-table-header>Fields</s-table-header>
+                  <s-table-header>Required</s-table-header>
                 </s-table-header-row>
                 <s-table-body>
                   {definitions.map((definition) => (
@@ -168,6 +169,18 @@ export default function MetaobjectFieldsPage() {
                       <s-table-cell>{definition.entryCount}</s-table-cell>
                       <s-table-cell>
                         {definition.fieldKeys.join(", ") || "—"}
+                      </s-table-cell>
+                      {/* An import file with no column for a required field
+                          fails every new entry, and nothing else in the admin
+                          shows this beside the type you import into. */}
+                      <s-table-cell>
+                        {definition.requiredFieldKeys.length ? (
+                          <s-badge tone="warning">
+                            {definition.requiredFieldKeys.join(", ")}
+                          </s-badge>
+                        ) : (
+                          "—"
+                        )}
                       </s-table-cell>
                     </s-table-row>
                   ))}
@@ -230,7 +243,7 @@ export default function MetaobjectFieldsPage() {
                           labelAccessibilityVisibility="exclusive"
                           name="fieldName"
                           value={row.name}
-                          placeholder="Title"
+                          placeholder="e.g. Usage"
                           onChange={(event: Event) => {
                             const name = (event.target as HTMLInputElement)
                               .value;
@@ -252,7 +265,7 @@ export default function MetaobjectFieldsPage() {
                           labelAccessibilityVisibility="exclusive"
                           name="fieldKey"
                           value={row.key}
-                          placeholder="title"
+                          placeholder="e.g. usage"
                           onChange={(event: Event) =>
                             update(index, {
                               key: (event.target as HTMLInputElement).value,
