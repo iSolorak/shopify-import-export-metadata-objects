@@ -39,6 +39,13 @@ export type Entry = {
   id: string;
   handle: string;
   displayName: string | null;
+  /**
+   * `ACTIVE` or `DRAFT`, or null when the definition is not publishable.
+   *
+   * Not a field, so it is invisible to anything that walks `fields` — which is
+   * why an entries CSV can look perfect while the entry behind it is refused.
+   */
+  status: string | null;
   values: Record<string, string>;
 };
 
@@ -239,6 +246,7 @@ const ENTRIES_PAGE = `#graphql
         id
         handle
         displayName
+        capabilities { publishable { status } }
         fields { key value }
       }
     }
@@ -251,6 +259,13 @@ const ENTRIES_PAGE = `#graphql
  * `field.value` is the API's own string encoding — JSON for list and reference
  * fields, a plain string otherwise. Exporting it verbatim is what makes the
  * round trip lossless, so it is deliberately not parsed or reformatted here.
+ *
+ * `status` is a *capability*, not a field, so it does not appear in `fields`
+ * and an export built from those alone cannot show it. It is read here because
+ * a DRAFT entry is "an internal record" in Shopify's own words: it exists, it
+ * has every value you gave it, and it is indistinguishable from a working one
+ * in a CSV — but things that reference it can reject it. Null when the
+ * definition does not have the publishable capability enabled.
  */
 type EntriesPageResponse = {
   metaobjects: {
@@ -259,6 +274,7 @@ type EntriesPageResponse = {
       id: string;
       handle: string;
       displayName: string | null;
+      capabilities: { publishable: { status: string } | null } | null;
       fields: { key: string; value: string | null }[];
     }[];
   };
@@ -286,6 +302,7 @@ export async function getEntries(admin: Admin, type: string): Promise<Entry[]> {
         id: node.id,
         handle: node.handle,
         displayName: node.displayName,
+        status: node.capabilities?.publishable?.status ?? null,
         values,
       });
     }

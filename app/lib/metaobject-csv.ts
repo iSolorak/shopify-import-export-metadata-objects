@@ -31,6 +31,19 @@ export const HANDLE_COLUMN = "handle";
  */
 export const DISPLAY_NAME_COLUMN = "display_name";
 
+/**
+ * Column holding the entry's publish status, `ACTIVE` or `DRAFT`.
+ *
+ * Exported and ignored on import, like `display_name`. It is here because it is
+ * the one property of an entry that an entries CSV could not previously show:
+ * status is a *capability*, not a field, so a DRAFT entry — "an internal
+ * record", in Shopify's words — exports byte-identically to a working one while
+ * things that reference it reject it. Writing it back is deliberately not
+ * supported; changing visibility is a decision for the admin, not a side effect
+ * of re-importing a sheet.
+ */
+export const STATUS_COLUMN = "status";
+
 /** Columns of the definition CSV, one row per field definition. */
 export const DEFINITION_COLUMNS = [
   "type",
@@ -52,11 +65,23 @@ export function isDefinitionCsv(headers: string[]): boolean {
 
 export function entriesToCsv(definition: Definition, entries: Entry[]): string {
   const fieldKeys = definition.fieldDefinitions.map((field) => field.key);
-  const header = [HANDLE_COLUMN, DISPLAY_NAME_COLUMN, ...fieldKeys];
+  // A definition is free to have a field of its own called `status`. Its values
+  // are the ones the merchant authored, so the field wins and the capability
+  // column is dropped — a duplicate header would otherwise make the file
+  // unreadable by `rowsToRecords`, which refuses them.
+  const withStatus = !fieldKeys.includes(STATUS_COLUMN);
+
+  const header = [
+    HANDLE_COLUMN,
+    DISPLAY_NAME_COLUMN,
+    ...(withStatus ? [STATUS_COLUMN] : []),
+    ...fieldKeys,
+  ];
 
   const rows = entries.map((entry) => [
     entry.handle,
     entry.displayName ?? "",
+    ...(withStatus ? [entry.status ?? ""] : []),
     ...fieldKeys.map((key) => entry.values[key] ?? ""),
   ]);
 
@@ -206,6 +231,7 @@ export function planEntryImport(
     (column) =>
       column !== HANDLE_COLUMN &&
       column !== DISPLAY_NAME_COLUMN &&
+      column !== STATUS_COLUMN &&
       !knownKeys.has(column),
   );
   const missingRequiredColumns = definition.fieldDefinitions
