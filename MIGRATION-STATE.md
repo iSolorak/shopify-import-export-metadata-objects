@@ -332,6 +332,30 @@ The join works because handles are identical across locales
 (`WAGTAILMODELTRANSLATION_TRANSLATE_SLUGS = False`), and the app recovers each
 handle from the `handle` row's `Default content` in the T&A export itself.
 
+### The source file's handles do not have to be spelled Shopify's way
+
+`matchSource` tries the **exact** handle, then the **folded** handle
+(`normalizeHandle`: accents stripped, case folded, every run of punctuation to a
+single `-`), then the title.
+
+The folded step exists because a shop's own export writes slugs its own way.
+One Romanian catalogue (Nica Beauty) exports `EXQUISITE_PRIMER` where Shopify
+has `exquisite-primer`, and on exact matching alone that dropped **38 of its
+110 matchable products** from the built file — silently, because a product that
+matches nothing is simply one the builder never sees. Matched went 72 → 110 and
+filled rows 144 → 220 once folded.
+
+Folding is a **fallback and never a replacement**, so it can only add matches.
+That matters: that same file contains both `lip-balm-pod` and `LIP_BALM_POD`,
+which fold together — the exact lookup runs first, so neither can take the
+other's match.
+
+⚠️ **The title fallback is inert unless the title column is called `title`.**
+`findColumn` matches exactly, so the Nica Beauty export's `Titlu [en]` is not
+found, `byTitle` is empty, and mapping a title column changes nothing about
+*matching* — it only chooses what gets written. If a file matches nothing and
+its title column is named in another language, that is why.
+
 `shopify_products_el.csv` is **correct as a translation source** and
 **dangerous as a product import** — feeding it to the product importer
 overwrites the English products with Greek text.
@@ -357,14 +381,25 @@ overwrites the English products with Greek text.
   second key is what actually decides, and without it the cell would come out
   in a different order each time and every product would read as changed.
 
-  | | Products with recommendations | Recommendations kept | Dropped (target not exported) |
-  | --- | --- | --- | --- |
-  | monreve | 92 of 110 | 279 | 1 |
-  | radiant-new | 84 of 142 | 270 | 55 |
-  | seventeen | 129 of 223 | 371 | 106 |
+  **A recommendation may name a variant, and a variant is not a product in
+  Shopify** — it has no handle and cannot be the target of a product reference.
+  Those resolve to the parent, which is the page the link would land on anyway.
+  Not an edge case: radiant recommends `Loose Powder (10 Pink)` and
+  `Touch of Blush (03 Rosy)` from "Natural Fix All Day Matt Foundation", and
+  46 of its 346 recommendations are shade-level. Dropping them lost real links
+  to products that were in the export all along, under another handle. Two
+  shades of one product collapse to one reference, and a product recommending
+  its own shade — which resolves to itself — is left out.
+
+  | | Products with recommendations | References | Variant targets recovered | Self-refs dropped |
+  | --- | --- | --- | --- | --- |
+  | monreve | 92 of 110 | 279 | 0 | 0 |
+  | radiant-new | 83 of 142 | 314 (+44) | 46 | 2 |
+  | seventeen | 131 of 223 | 399 (+28) | 29 | 0 |
 
   Zero dangling references in all three, checked against the handles each file
-  itself carries.
+  itself carries. monreve is unchanged because it has no shade-level
+  recommendations at all.
 
   **The app side needed the other half.** `list.product_reference` was falling
   through to the generic list branch, which JSON-encodes the cell as written —

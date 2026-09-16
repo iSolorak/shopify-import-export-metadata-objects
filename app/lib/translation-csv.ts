@@ -96,6 +96,34 @@ export function normalizeKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/**
+ * A handle folded to the form two systems can agree on.
+ *
+ * Shopify says `exquisite-primer`; the shop's own export says
+ * `EXQUISITE_PRIMER`, and on one Romanian catalogue that difference silently
+ * dropped 43 of 127 products from the built file — a third of it, with no
+ * error, because a handle that does not match is simply a product the builder
+ * never sees.
+ *
+ * Accents are stripped as well as case and separators folded. A Shopify handle
+ * is always transliterated ASCII, so an accented slug (`Cremă_Hidratantă`)
+ * could never match one without it.
+ *
+ * This is a **fallback**, never a replacement: `matchSource` tries the exact
+ * handle first, so folding can only add matches where there were none. Two
+ * source rows that fold together — `lip-balm-pod` and `LIP_BALM_POD` both
+ * exist on that catalogue — therefore cannot take the exact match away from
+ * each other.
+ */
+export function normalizeHandle(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/\p{M}+/gu, "")
+    .toLowerCase()
+    .replace(/[^0-9a-z]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export type TranslationProduct = {
   /** The Shopify product ID, as it appears in the export. */
   id: string;
@@ -196,6 +224,8 @@ export type ParsedSource = {
   columns: string[];
   records: Record<string, string>[];
   byHandle: Map<string, Record<string, string>>;
+  /** The same rows under `normalizeHandle`, tried only when the exact key misses. */
+  byFoldedHandle: Map<string, Record<string, string>>;
   /** Titles mapping to more than one product are held here and never guessed. */
   byTitle: Map<string, Record<string, string>[]>;
 };
@@ -213,19 +243,24 @@ export function parseSource(rows: string[][]): ParsedSource {
   const records = collapseVariantRows(rowsToRecords(rows), columns, handleColumn);
 
   const byHandle = new Map<string, Record<string, string>>();
+  const byFoldedHandle = new Map<string, Record<string, string>>();
   const byTitle = new Map<string, Record<string, string>[]>();
 
   for (const record of records) {
-    const handle = handleColumn
-      ? normalizeKey(record[handleColumn] ?? "")
-      : "";
+    const raw = handleColumn ? (record[handleColumn] ?? "") : "";
+    const handle = raw ? normalizeKey(raw) : "";
     if (handle && !byHandle.has(handle)) byHandle.set(handle, record);
+
+    const folded = raw ? normalizeHandle(raw) : "";
+    if (folded && !byFoldedHandle.has(folded)) {
+      byFoldedHandle.set(folded, record);
+    }
 
     const title = titleColumn ? normalizeKey(record[titleColumn] ?? "") : "";
     if (title) byTitle.set(title, [...(byTitle.get(title) ?? []), record]);
   }
 
-  return { columns, records, byHandle, byTitle };
+  return { columns, records, byHandle, byFoldedHandle, byTitle };
 }
 
 /**
@@ -418,13 +453,23 @@ export function buildTranslationCsv({
   };
 }
 
-/** Handle first, then title. Returns "ambiguous" if the title is not unique. */
+/**
+ * Exact handle, then folded handle, then title. Returns "ambiguous" if the
+ * title is not unique.
+ *
+ * The folded step is what lets a shop whose export writes `EXQUISITE_PRIMER`
+ * meet Shopify's `exquisite-primer`. It runs after the exact lookup so it can
+ * only add matches, never move one.
+ */
 function matchSource(
   product: TranslationProduct,
   source: ParsedSource,
 ): Record<string, string> | "ambiguous" | null {
   const byHandle = source.byHandle.get(normalizeKey(product.handle));
   if (byHandle) return byHandle;
+
+  const folded = source.byFoldedHandle.get(normalizeHandle(product.handle));
+  if (folded) return folded;
 
   const byTitle = source.byTitle.get(normalizeKey(product.title));
   if (!byTitle || byTitle.length === 0) return null;
