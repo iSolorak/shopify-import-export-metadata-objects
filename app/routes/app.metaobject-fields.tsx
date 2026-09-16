@@ -105,6 +105,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         (await listMetafieldDefinitions(admin, "PRODUCT")).map((d) => d.column),
       );
 
+      // A reference row names the metaobject definition by type; only this
+      // store knows its gid. Looked up once, and only when a row asks for it —
+      // the rich text definitions every other file carries need no such call.
+      const metaobjectIds = new Map<string, string>();
+      if (parsed.definitions.some((definition) => definition.metaobjectType)) {
+        for (const definition of await listDefinitions(admin)) {
+          metaobjectIds.set(definition.type, definition.id);
+        }
+      }
+
       let created = 0;
       const skipped: string[] = [];
       const failures: string[] = [];
@@ -116,7 +126,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           continue;
         }
 
-        const result = await createMetafieldDefinition(admin, definition);
+        const metaobjectDefinitionId = definition.metaobjectType
+          ? metaobjectIds.get(definition.metaobjectType)
+          : undefined;
+        if (definition.metaobjectType && !metaobjectDefinitionId) {
+          // Creating it unrestricted would look like success and then reject
+          // every bare handle at import time, so refuse the row instead.
+          failures.push(
+            `${column}: no "${definition.metaobjectType}" metaobject definition in this store. Import its definition and entries first.`,
+          );
+          continue;
+        }
+
+        const result = await createMetafieldDefinition(admin, {
+          ownerType: definition.ownerType,
+          namespace: definition.namespace,
+          key: definition.key,
+          name: definition.name,
+          type: definition.type,
+          description: definition.description,
+          pin: definition.pin,
+          ...(metaobjectDefinitionId ? { metaobjectDefinitionId } : {}),
+        });
         if (result.ok) created++;
         else failures.push(`${column}: ${result.errors.join("; ")}`);
       }
@@ -334,6 +365,13 @@ export default function MetaobjectFieldsPage() {
               usage, ingredients, warnings — as pinned rich text fields, so they
               appear in the <strong>Product metafields</strong> card on every
               product.
+            </s-paragraph>
+            <s-paragraph>
+              A row with a <s-text>metaobject_type</s-text> column — the claims
+              link is one — points the metafield at that metaobject definition,
+              so its entries have to exist first. Import them above before this
+              file, or the row is reported as a failure rather than created
+              pointing at nothing.
             </s-paragraph>
             <s-paragraph>
               Then import <s-text>product-metafields.csv</s-text> on the{" "}

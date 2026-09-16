@@ -171,6 +171,7 @@ export const METAFIELD_DEFINITION_COLUMNS = [
   "type",
   "description",
   "pin",
+  "metaobject_type",
 ] as const;
 
 export function isMetafieldDefinitionCsv(headers: string[]): boolean {
@@ -189,6 +190,12 @@ export type MetafieldDefinitionDraft = {
   type: string;
   description: string | null;
   pin: boolean;
+  /**
+   * The metaobject definition a reference metafield is restricted to, by
+   * **type** rather than by id — a CSV written by another system cannot know
+   * this store's gids. The caller resolves it against the live definitions.
+   */
+  metaobjectType?: string;
 };
 
 /**
@@ -231,6 +238,18 @@ export function parseMetafieldDefinitions(
         ? "PRODUCTVARIANT"
         : "PRODUCT";
 
+    const metaobjectType = (record.metaobject_type ?? "").trim();
+    if (
+      metaobjectType &&
+      type !== REFERENCE_TYPE &&
+      type !== LIST_REFERENCE_TYPE
+    ) {
+      errors.push(
+        `${row}: metaobject_type is only meaningful on ${REFERENCE_TYPE} or ${LIST_REFERENCE_TYPE}, not "${type}".`,
+      );
+      return;
+    }
+
     definitions.push({
       ownerType,
       namespace,
@@ -242,6 +261,7 @@ export function parseMetafieldDefinitions(
       // appears in the product page's metafields card, which looks exactly
       // like the import having silently done nothing.
       pin: (record.pin ?? "").trim().toLowerCase() !== "false",
+      ...(metaobjectType ? { metaobjectType } : {}),
     });
   });
 
