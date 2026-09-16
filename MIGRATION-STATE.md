@@ -13,13 +13,19 @@ Last updated: 2026-09-11.
 | | Path | Role |
 | --- | --- | --- |
 | **Django Oscar** | `/home/solorak/radiant-new` | Produces CSVs. Django 3.2 + Oscar 3.2 + Wagtail. |
-| **Django Oscar** | `/home/solorak/monreve` | A second catalogue, same `shopify_export` app ported across. Python 3.8, and `project/` is on the path in its own right (`multisite.settings`, not `project.multisite.settings`). |
+| **Django Oscar** | `/home/solorak/monreve` | A second catalogue, same `shopify_export` app ported across. |
+| **Django Oscar** | `/home/solorak/Documents/projects/seventeen` | A third. |
 | **Shopify app** | `/home/solorak/shopifydev/shopify-import-export-metadata-objects` | Consumes them. React Router 7, embedded admin app. |
 
-The two Django sides are **siblings, not a fork to be merged**: they share the
-shape of `shopify_export` and differ in what their catalogues carry. Work done
-on one does not land on the other by itself — the claim link below is in monreve
-only.
+The three Django sides are **siblings, not a fork to be merged**: they share the
+shape of `shopify_export` almost line for line and differ in what their
+catalogues carry (`PRODUCT_METAFIELDS` is different in each). Work done on one
+does not land on the others by itself. All three run Python 3.8 with `project/`
+on the path in its own right, so a settings module reads `multisite.settings`,
+not `project.multisite.settings`.
+
+Their country-code env vars differ: `DJANGO_OSCAR_RADIANT_COUNTRY_CODE`,
+`DJANGO_OSCAR_MONREVE_COUNTRY_CODE`, `DJANGO_OSCAR_SEVENTEEN_COUNTRY_CODE`.
 
 **The contract between them is CSV files carried by hand.** Nothing is wired
 API-to-API: the Django app holds no Shopify credentials, the Shopify app holds
@@ -225,8 +231,7 @@ store. It is a copy of store state, and stale is the one way it misleads.
 ### Claims are linked through `custom.claim`
 
 The entries put the badges *in* the store; this is what puts them *on a
-product*. Built in the **monreve** repo (`/home/solorak/monreve`), whose
-catalogue carries 17 claims against the store's 5.
+product*. **In all three Django repos**, identical code.
 
 - The metafield is `custom.claim`, `list.metaobject_reference`, pinned,
   restricted to the `claim` metaobject definition. `list.` because a product
@@ -264,9 +269,26 @@ been indexed, so a store carrying both forms still keeps them apart. Without it
 53 products lost that badge silently — an unmatched claim is not an error, it is
 simply absent.
 
-Measured on `monreve_db` (intl): 110 exportable products, 64 with claims, 6
-distinct cells. Of 17 catalogue claims, 5 match the store; the other 12 have no
-entry and are dropped.
+Measured against each intl database:
+
+| Repo | Exportable | With claims | Catalogue claims matched |
+| --- | --- | --- | --- |
+| radiant-new | 142 | **142** | 4 of 15 |
+| monreve | 110 | 64 | 5 of 17 |
+| seventeen | 223 | 206 | 3 of 17 |
+
+**The store has only five badges, and every catalogue has far more claims than
+that.** Most of what the catalogues carry has nowhere to go and is dropped. Two
+cases are worth a merchant's decision rather than a matcher's guess:
+
+- seventeen has `Waterproof` and `Water and Sweat Resistant`; the store badge is
+  `water-resistant`. Not folded — in cosmetics those are different claims.
+- radiant-new and seventeen have no paraben claim at all, so the store's
+  `paraben-free` badge goes unused there. monreve's `PARABENS FREE` is the one
+  that needed the singular fallback.
+
+To use more of them, build the badges in the store first, then refresh every
+repo's `data/claim_entries.csv` from `/app`.
 
 ⚠️ The definitions CSV still contains a `claim` row. The store already has the
 type, so importing it fails — `metaobjectDefinitionCreate` cannot update, and
@@ -320,6 +342,124 @@ overwrites the English products with Greek text.
 
 **Django**
 
+- **Recommended products are exported.** Oscar's upsell block
+  (`ProductRecommendation`) now fills
+  `shopify--discovery--product_recommendation.related_products` — the column
+  `SHOPIFY_HEADERS` has always carried and nothing ever filled. Written as
+  product **handles** joined by `;`, the spelling Shopify's own export uses for
+  a `list.product_reference`.
+
+  **Only products the same export writes.** A recommendation pointing at
+  something unexported would name a handle the store has never heard of, and an
+  unresolvable product reference fails the row rather than being skipped — so
+  the export takes the intersection. Ordering is `ranking` first, then position
+  in the export; ranking is 0 on almost every row in these catalogues, so the
+  second key is what actually decides, and without it the cell would come out
+  in a different order each time and every product would read as changed.
+
+  | | Products with recommendations | Recommendations kept | Dropped (target not exported) |
+  | --- | --- | --- | --- |
+  | monreve | 92 of 110 | 279 | 1 |
+  | radiant-new | 84 of 142 | 270 | 55 |
+  | seventeen | 129 of 223 | 371 | 106 |
+
+  Zero dangling references in all three, checked against the handles each file
+  itself carries.
+
+  **The app side needed the other half.** `list.product_reference` was falling
+  through to the generic list branch, which JSON-encodes the cell as written —
+  so handles went to the API where gids were required. `resolveProductHandles()`
+  now resolves them in one batched `productByIdentifier` pass (not
+  `products(query:)` — a loose handle match would silently recommend the wrong
+  product), and `toMetafieldValue` converts both `product_reference` and
+  `list.product_reference`. An unknown handle is a per-row error, not a silent
+  drop.
+
+- **A category metafield on an uncategorised product killed the whole product.**
+  `shopify.color-pattern` is a Shopify **category metafield**: its definition is
+  scoped by *owner subtype*, the product's taxonomy category. A product whose
+  `Product Category` is empty satisfies no such constraint, and Shopify rejects
+  every row of it — `Validation failed: Owner subtype does not match the
+  metafield definition's constraints`, naming no column. In one monreve import
+  that was 14 products, and the predicate matched the failures exactly: of 46
+  products carrying the metafield, the **14 with no category failed and the 32
+  with one imported**.
+
+  `_carries_category_metafields()` is now the gate. No category means no
+  `shopify.color-pattern` cell *and* no linked shade option — linking writes the
+  same metafield, so it fails the same way. The product still exports, with its
+  shades as plain option values.
+
+  That is the guard. The **fix** is a category, so nine catalogue names that
+  carry shades were mapped: `blusher`, `eyeliner`, `liquid lipstick`,
+  `lip gloss`, `lip oil`, `lip balm`, `french manicure`,
+  `highlighting & contouring`, `glitter gel`. All nine reuse a path already
+  present in the table — an unverified deeper guess would trade this failure for
+  a rejected category — so `lip gloss` and `lip oil` stop at `Lip Makeup` and
+  `glitter gel` at `Makeup`. All 14 products now export with a real category
+  **and** keep their swatches.
+
+  After this: **0** products carry the metafield without a category in any of
+  the three, and **nothing lost swatches** — radiant's 49 uncategorised products
+  have no shades at all, and seventeen has none uncategorised.
+
+- **Tools were exporting as the cosmetic they apply.** `Product Category` takes
+  the deepest catalogue category that has a taxonomy path, and a foundation
+  brush sits in `Brushes` *and* `Face` — `Face` is deeper, so every brush went
+  out as makeup. `SHOPIFY_TOOL_CATEGORIES` (`tools`, `brushes`,
+  `brushes & tools`, `makeup sponges`) is now checked **first** and wins
+  outright, and `_TOOL_TITLE_RE` catches the rest by title: `151 EYEBROW BRUSH`
+  is filed only under `Eyebrows`, so no category could tell it from a brow
+  pencil. `_TOOL_TITLE_EXCLUDE_RE` then takes back the things sold *for* tools —
+  `BRUSH CLEANSER & CONDITIONER` is a liquid, and it is filed under
+  `Brushes & Tools`, so the exclusion has to beat the category too. Whole-word
+  matching is what keeps `10 FACIAL CLEANSING GLOVE SPONGE` a tool: "cleansing"
+  is not "cleanser".
+
+  Tool names are deliberately **not** in `SHOPIFY_PRODUCT_CATEGORIES`. A name in
+  both tables comes back through the second one after the first has ruled it
+  out — which is exactly how the brush cleanser slipped through the first cut.
+
+  `Accessories` is deliberately not a tool category: it holds sponges, but
+  mirrors and beauty cases too. Those stay uncategorised, which beats
+  confidently wrong.
+
+- **`Brows` was unmapped while `Eyebrows` was mapped.** Both names are in use.
+  The result was backwards: brow *makeup* (in `Brows`) exported with no category
+  at all, while a brow *brush* (in `Eyebrows`) exported as Eyebrow Enhancers.
+  `brows` now maps alongside `eyebrows`.
+
+  Measured effect: **monreve 44 of 110** products change (40 to Makeup Tools, 4
+  to Eyebrow Enhancers), **radiant-new 22 of 142** (16 / 6), **seventeen 2 of
+  223** (2 / 0) — seventeen was already mostly right because its `Αξεσουάρ`
+  category carries the English name `Tools`. Every changed row was read by hand;
+  no cosmetic was dragged into Makeup Tools.
+
+  Two judgement calls worth knowing: brush **sets** move from `Cosmetic Sets` to
+  `Makeup Tools` (5 in monreve), and seventeen's `Sonic To Glow Facial Brush`
+  moves from `Facial Cleansers` to `Makeup Tools`. Both are defensible and
+  neither was asked for; say so and either can be carved out.
+
+- **The option columns now match Shopify's own export exactly.** `Option1 Name`
+  and `Option1 Linked To` describe the option, which belongs to the product, so
+  Shopify writes them on the product's **first row only** and leaves them blank
+  on the remaining variant rows; only `Option1 Value` repeats. We were
+  repeating all three. Both shapes import correctly — this was verified against
+  a real store export of `lip-mousse`, which our file had created — so the cost
+  was the round trip, not the import. All three repos now emit the first-row
+  form, and a regenerated `lip-mousse` is byte-identical to Shopify's export of
+  it across all three option columns, 41 rows each.
+
+  The values themselves were already right and are now confirmed against that
+  export: `Option1 Value` is the **metaobject handle** (`01-madrid-780f1a-monreve`),
+  not the display name, and `Option1 Linked To` is
+  `product.metafields.shopify.color-pattern` — exactly `SHADE_OPTION_LINKED_TO`.
+  Neither had ever been checked against a real Shopify file; the test asserted
+  the constant against itself.
+
+  The **inventory** CSV is a different format and legitimately repeats
+  `Option1 Name` on every row. It was deliberately left alone.
+
 - `Vendor` was the literal string `"Oscar"` on every product. `OSCAR_SHOP_NAME`
   is unset project-wide, so Oscar's placeholder default reached the CSV. Now
   `configured_vendor()` treats it as unset and falls back to the site name.
@@ -356,6 +496,15 @@ overwrites the English products with Greek text.
 
 ## Gotchas that cost time
 
+- **`-2`, `-3` … on a shade handle is not a duplicate.** The store holds 335 of
+  them and they look exactly like a botched repeat import. They are not: shade
+  labels collide constantly across products — a dozen products each have a
+  "No.01" — so `_unique_handle()` disambiguates, and the display name carries
+  the product in brackets (`No.01 (Clear Skin Spot Control Compact Powder
+  SPF20)`). Checked: of the 335 numbered handles whose base also exists,
+  **0** share a colour with their base; all 335 are distinct shades. Before
+  "cleaning up" any of these, compare the `color` column — that is what tells a
+  disambiguated shade from a real duplicate.
 - **Pinning.** `MetafieldDefinitionInput.pin` defaults to `false`, and an
   unpinned definition never appears in the product page's metafields card — it
   looks exactly like the import having done nothing. The app pins by default and
@@ -386,9 +535,10 @@ overwrites the English products with Greek text.
 2. **`product_video_poster`** (5 products) has no home. It is a file, and the
    product importer writes metafield cells verbatim, so a URL would land in a
    `file_reference` expecting a gid.
-3. **`recommended_products`** (85 products) is unexported. Belongs in Shopify's
-   `shopify--discovery--product_recommendation.related_products`, a column the
-   products CSV already emits but never fills.
+3. **`related_products_display`** is still unfilled — the settings metafield
+   beside `related_products`, which controls how the storefront renders the
+   block. `related_products` itself is now exported and imported; see "Bugs
+   found and fixed".
 4. **`configured_languages()`** fallback bug above.
 5. **Multi-store question, unresolved.** `bg` and `ro` are separate Django
    databases with separate catalogues, not translations of the GR one. That may
@@ -400,6 +550,20 @@ overwrites the English products with Greek text.
    now a second, worse hub.
 7. **No JS test runner** in the Shopify app. `package.json` has no `test`
    script; verification is `typecheck` + `lint` + ad-hoc harnesses.
+8. **Pre-existing `Vendor` test failures in two repos.** Of the 121 no-database
+   tests, radiant-new fails 3 and seventeen fails 2, all in `VendorTests` /
+   `test_excludes_unpublished_and_includes_zero_stock_items`. `configured_vendor()`
+   returns the site's real name where the test expects the overridden
+   `OSCAR_SHOP_NAME`, so `@override_settings` is not reaching it. Confirmed
+   unrelated to recent work by A/B — the same failures appear with the changes
+   reverted. monreve passes all 121. radiant-new's file also asserts
+   `"Seventeen Cosmetics"` in one place, a copy-paste artifact of the port.
+   So does seventeen's `_shade_metaobjects` docstring, which says `-radiant`.
+   Harmless, but a reminder that the three files were copied, not generated:
+   grep for a sibling's brand name before trusting any string in them.
+9. **`studio-3-step-manicure-system` (seventeen, id 436) exports 294 media**,
+   over Shopify's limit of 250. The exporter warns; Shopify rejects the whole
+   product. It needs splitting or fewer variant images.
 
 ---
 

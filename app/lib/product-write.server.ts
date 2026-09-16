@@ -693,6 +693,65 @@ export async function resolveMetaobjectHandles(
   return resolved;
 }
 
+/**
+ * Resolve product handles to gids, for `product_reference` metafields.
+ *
+ * The same shape as the metaobject resolver above and for the same reason: the
+ * CSV names a product the way a person would, and the API wants a gid.
+ *
+ * `productByIdentifier`, not `products(query:)` — a loose handle match here
+ * would silently recommend the wrong product, which is worse than not
+ * recommending one. Handles go in as variables so a quote in one cannot break
+ * out of the query.
+ */
+export async function resolveProductHandles(
+  admin: Admin,
+  handles: string[],
+): Promise<Map<string, string>> {
+  const unique = [
+    ...new Set(handles.map((handle) => handle.trim().toLowerCase())),
+  ].filter(Boolean);
+
+  const resolved = new Map<string, string>();
+
+  for (let start = 0; start < unique.length; start += HANDLE_BATCH_SIZE) {
+    const batch = unique.slice(start, start + HANDLE_BATCH_SIZE);
+
+    const declarations = batch
+      .map((_, index) => `$h${index}: String!`)
+      .join(", ");
+    const selections = batch
+      .map(
+        (_, index) => `
+        p${index}: productByIdentifier(identifier: { handle: $h${index} }) { id }`,
+      )
+      .join("");
+
+    const document = `#graphql
+      query ProductsByHandleForReference(${declarations}) {${selections}
+      }
+    `;
+
+    const variables: Record<string, string> = {};
+    batch.forEach((handle, index) => {
+      variables[`h${index}`] = handle;
+    });
+
+    const data = await query<Record<string, { id: string } | null>>(
+      admin,
+      document,
+      variables,
+    );
+
+    batch.forEach((handle, index) => {
+      const node = data[`p${index}`];
+      if (node) resolved.set(handle, node.id);
+    });
+  }
+
+  return resolved;
+}
+
 const CATEGORY_SEARCH = `#graphql
   query FindProductCategory($search: String!) {
     taxonomy {
@@ -750,6 +809,26 @@ export async function findCategories(
 // Metafield value conversion
 // ---------------------------------------------------------------------------
 
+/** Metafield types whose value is a product gid. */
+export const PRODUCT_REFERENCE_TYPES = [
+  "product_reference",
+  "list.product_reference",
+];
+
+/**
+ * Product handles a cell refers to, so they can be resolved in one pass.
+ *
+ * `handle;handle`, the spelling Shopify's own product export uses for a
+ * product-reference list — and the one the Oscar side writes for
+ * `shopify--discovery--product_recommendation.related_products`.
+ */
+export function productRefsIn(cell: string): string[] {
+  return cell
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 /** Metafield types whose value is a metaobject gid. */
 export const METAOBJECT_TYPES = [
   "metaobject_reference",
@@ -805,8 +884,32 @@ export function toMetafieldValue(
   cell: string,
   metaobjects: Map<string, string>,
   defaultMetaobjectType?: string,
+  products?: Map<string, string>,
 ): { ok: true; value: string } | { ok: false; message: string } {
   const trimmed = cell.trim();
+
+  if (PRODUCT_REFERENCE_TYPES.includes(type)) {
+    const refs = productRefsIn(trimmed);
+    if (!refs.length) {
+      return {
+        ok: false,
+        message: `Expected one or more product handles separated by ";", got "${trimmed}".`,
+      };
+    }
+
+    const ids: string[] = [];
+    for (const handle of refs) {
+      const id = products?.get(handle.toLowerCase());
+      if (!id) {
+        return { ok: false, message: `No product with the handle "${handle}".` };
+      }
+      ids.push(id);
+    }
+
+    return type.startsWith("list.")
+      ? { ok: true, value: JSON.stringify(ids) }
+      : { ok: true, value: ids[0] };
+  }
 
   if (type === "rich_text_field") {
     try {

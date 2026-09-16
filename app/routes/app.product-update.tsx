@@ -25,13 +25,16 @@ import {
   getProductsForUpdateByTitle,
   listLocations,
   metaobjectRefsIn,
+  productRefsIn,
   resolveMetaobjectHandles,
+  resolveProductHandles,
   setInventoryQuantities,
   setMetafields,
   toMetafieldValue,
   updateProductFields,
   updateVariants,
   METAOBJECT_TYPES,
+  PRODUCT_REFERENCE_TYPES,
   type ExistingProduct,
   type MetafieldRef,
   type MetafieldWrite,
@@ -299,6 +302,7 @@ async function buildPlan(
     defaultTypeFor,
   );
   const categories = await resolveCategories(admin, grouped.rows);
+  const referencedProducts = await resolveProductRefs(admin, grouped.rows, resolved);
 
   const context: PlanContext = {
     products,
@@ -312,6 +316,7 @@ async function buildPlan(
         cell,
         ctx.metaobjects,
         defaultTypeFor(target),
+        referencedProducts,
       ),
   };
 
@@ -365,6 +370,47 @@ async function resolveMetaobjectRefs(
   }
 
   return refs.length ? resolveMetaobjectHandles(admin, refs) : new Map();
+}
+
+/**
+ * Resolve every product handle the file's reference columns mention.
+ *
+ * Same reason as the metaobject pass: gathered up front because the planner is
+ * pure and cannot await. `related_products` is the column that needs it — a
+ * recommendation names another product by handle, and the API wants its gid.
+ *
+ * These are handles of products the file points *at*, not the ones it updates,
+ * so they are looked up separately from `getProductsForUpdate`.
+ */
+async function resolveProductRefs(
+  admin: Admin,
+  rows: ProductRow[],
+  resolved: ReturnType<typeof resolveHeaders>,
+): Promise<Map<string, string>> {
+  const fields = new Set<string>();
+  for (const target of resolved.byColumn.values()) {
+    if (
+      target.metafield &&
+      PRODUCT_REFERENCE_TYPES.includes(target.metafield.type)
+    ) {
+      fields.add(target.field);
+    }
+  }
+  if (!fields.size) return new Map();
+
+  const handles: string[] = [];
+  const collect = (values: Map<string, string>) => {
+    for (const [field, value] of values) {
+      if (fields.has(field)) handles.push(...productRefsIn(value));
+    }
+  };
+
+  for (const row of rows) {
+    collect(row.values);
+    for (const variant of row.variants) collect(variant.values);
+  }
+
+  return handles.length ? resolveProductHandles(admin, handles) : new Map();
 }
 
 /**
