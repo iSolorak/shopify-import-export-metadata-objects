@@ -350,6 +350,24 @@ That matters: that same file contains both `lip-balm-pod` and `LIP_BALM_POD`,
 which fold together — the exact lookup runs first, so neither can take the
 other's match.
 
+### A value identical to the source is never written
+
+`buildTranslationCsv` skips any row whose formatted value equals that row's
+`Default content`, and reports the count as `unchanged`.
+
+This is the structural version of the "do not map `Title`" guidance above.
+Shopify **rejects** such rows outright — one Nica Beauty import came back
+`Failed: 72`, and all 72 were `handle` rows whose "translation" was the handle —
+and where it does accept one, it marks the product translated when nothing was.
+On that catalogue only **22 of 110** titles are genuinely different in Romanian;
+the other 88 used to be written as translations of themselves.
+
+`handle` also has `format: "handle"` now, so a mapped slug column is run through
+`normalizeHandle` before comparison. A shop's slug column reads `DEWY_SKIN`, and
+writing that verbatim gave 38 products a Romanian URL handle of `DEWY_SKIN`.
+Normalised it becomes `dewy-skin`, which equals the default and is skipped — so
+mapping a slug column to `handle` is now inert rather than destructive.
+
 ⚠️ **The title fallback is inert unless the title column is called `title`.**
 `findColumn` matches exactly, so the Nica Beauty export's `Titlu [en]` is not
 found, `byTitle` is empty, and mapping a title column changes nothing about

@@ -46,6 +46,7 @@ type ActionData =
       unmatched: string[];
       ambiguous: string[];
       missingFields: string[];
+      unchanged: number;
       /** Metafield rows the store could not account for, if any were mapped. */
       unresolvedMetafields: number;
     } & Counts)
@@ -515,6 +516,19 @@ export default function TranslationsPage() {
                   but if it covers nearly all of them, the translations file
                   probably came from a different store than the one this app is
                   installed on.
+                </s-paragraph>
+              </s-banner>
+            )}
+
+            {data.unchanged > 0 && (
+              <s-banner tone="warning">
+                <s-paragraph>
+                  {data.unchanged} row(s) were left out because the mapped value
+                  was identical to the source text. Shopify rejects those, and
+                  where it accepts one it marks the product translated when
+                  nothing was. A large number here usually means a column is
+                  mapped to a field it does not translate — the handle and the
+                  title are the usual ones.
                 </s-paragraph>
               </s-banner>
             )}

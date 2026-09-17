@@ -52,7 +52,7 @@ export type TranslationTarget = {
   /** `title` for a product field, `custom.usage` for a metafield. */
   field: string;
   label: string;
-  format: "text" | "rich_text";
+  format: "text" | "rich_text" | "handle";
   kind: "product" | "metafield";
 };
 
@@ -70,7 +70,11 @@ export const PRODUCT_FIELDS: TranslationTarget[] = [
     format: "text",
     kind: "product",
   },
-  { field: "handle", label: "Handle", format: "text", kind: "product" },
+  // `handle` is formatted rather than passed through. Shopify handles are
+  // lowercase and hyphenated, and the column a shop maps here is its own slug
+  // column — one catalogue's reads `DEWY_SKIN`, which is not a handle in any
+  // locale. Writing it verbatim produced localised URLs nobody asked for.
+  { field: "handle", label: "Handle", format: "handle", kind: "product" },
   {
     field: "product_type",
     label: "Product type",
@@ -342,6 +346,13 @@ export type BuildResult = {
   ambiguous: string[];
   /** Products matched, but whose mapped field has no row in the export. */
   missingFields: string[];
+  /**
+   * Rows skipped because the mapped value was identical to the source.
+   *
+   * Worth reporting rather than hiding: a big number here usually means a
+   * column was mapped to a field it does not translate.
+   */
+  unchanged: number;
 };
 
 /**
@@ -394,6 +405,7 @@ export function buildTranslationCsv({
   const ambiguous: string[] = [];
   const missingFields = new Set<string>();
   let matched = 0;
+  let unchanged = 0;
 
   for (const product of translations.products) {
     const record = matchSource(product, source);
@@ -426,7 +438,20 @@ export function buildTranslationCsv({
         continue;
       }
 
-      writes.set(rowIndex, formatValue(cell, target));
+      const value = formatValue(cell, target);
+      // A value identical to the source is not a translation. Shopify rejects
+      // those rows outright — 72 of them on one import, every single one a
+      // `handle` whose "translation" was the handle — and where it does accept
+      // one it marks the product translated when nothing was translated. That
+      // is the same trap the guidance about not mapping `Title` describes;
+      // this makes it structural rather than something to remember.
+      const original = translations.rows[rowIndex]?.[DEFAULT_COLUMN] ?? "";
+      if (value.trim() === original.trim()) {
+        unchanged++;
+        continue;
+      }
+
+      writes.set(rowIndex, value);
     }
   }
 
@@ -450,6 +475,7 @@ export function buildTranslationCsv({
     unmatched,
     ambiguous,
     missingFields: [...missingFields],
+    unchanged,
   };
 }
 
@@ -487,5 +513,7 @@ function matchSource(
  * keeps the text exactly as the shop's export wrote it.
  */
 function formatValue(cell: string, target: TranslationTarget) {
-  return target.format === "rich_text" ? cellToRichTextValue(cell) : cell;
+  if (target.format === "rich_text") return cellToRichTextValue(cell);
+  if (target.format === "handle") return normalizeHandle(cell);
+  return cell;
 }
