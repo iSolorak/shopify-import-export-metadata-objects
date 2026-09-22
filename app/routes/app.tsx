@@ -25,6 +25,7 @@ export default function App() {
         <s-link href="/app/product-videos">Add product videos</s-link>
         <s-link href="/app/product-update">Update products</s-link>
         <s-link href="/app/variant-metafields">Variant metafields</s-link>
+        <s-link href="/app/color-family">Colour families</s-link>
       </s-app-nav>
       <Outlet />
     </AppProvider>
