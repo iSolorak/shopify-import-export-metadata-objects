@@ -45,29 +45,22 @@ export type DefinitionSet = {
   product: RichTextDefinition[];
 };
 
-/**
- * Products per page.
- *
- * Each one carries up to `VARIANT_PAGE_SIZE` variants, every variant carries one
- * metafield lookup per variant definition, and the product carries one per
- * product definition — by some distance the most expensive query in this app.
- * Twenty-five keeps a store with a dozen definitions of each inside the query
- * cost budget; the fifty the rich text export uses would not, because that one
- * reads a single metafield per *product*.
- */
-const PRODUCT_PAGE_SIZE = 25;
-
-/** Variants read with their product before a second pass picks up the rest. */
-const VARIANT_PAGE_SIZE = 100;
-
-/** Variants per page when reading them from the top-level connection. */
+/** The most variants a page will ever ask for; `variantPageSize` lowers it as
+ *  the definition count grows. */
 const VARIANT_CONNECTION_PAGE_SIZE = 100;
+
+/** Products per page when turning handles into ids. Cheap: two scalars each. */
+const HANDLE_PAGE_SIZE = 50;
 
 /** SKUs or handles per search query; a long OR chain is the slowest kind. */
 const SEARCH_BATCH_SIZE = 20;
 
 /** Ids per `nodes(ids:)` call. */
 const NODE_BATCH_SIZE = 100;
+
+/** Ceiling for the product-metafield lookup; `productNodeBatchSize` lowers it
+ *  as the definition count grows. */
+const PRODUCT_NODE_BATCH_SIZE = 50;
 
 /**
  * Variants read in one export.
@@ -194,7 +187,8 @@ function toVariantMetafields(
     productHandle: product.handle,
     productTitle: product.title,
     values: readValues(node, definitions.variant, "mf"),
-    productValues: readValues(product, definitions.product, "pmf"),
+    // Filled by `attachProductMetafields`, not read here — see its comment.
+    productValues: {},
   };
 }
 
@@ -203,137 +197,60 @@ function toVariantMetafields(
 // ---------------------------------------------------------------------------
 
 /**
- * Variants read through the products connection.
+ * Every read here goes through the **flat** `productVariants` connection, and
+ * every page size below is derived rather than chosen. Both are consequences of
+ * one rule: a single Admin API query may not exceed 1,000 cost points, checked
+ * before it runs.
  *
- * Used for both the full export and the handle lookup: the only difference is
- * the `query` argument, and building the two separately would mean two places
- * to keep the metafield selections right.
+ * A connection costs `2 + first × (cost of one node)`, and an object costs 1.
+ * The obvious shape for this feature — `products(first: 25) { variants(first:
+ * 100) { … } }` — therefore costs about `25 × (2 + 100 × (2 + definitions))`,
+ * which is five figures before a single metafield is selected. It fails outright
+ * with `Query cost is …, which exceeds the single query max cost limit (1000)`,
+ * and the merchant sees an unexplained server error. Flattening removes the
+ * multiplication: one page of variants costs `2 + first × (3 + definitions)`.
  *
- * The nested `variants` connection is capped at `VARIANT_PAGE_SIZE` rather than
- * paged inline, because a nested cursor cannot be advanced without re-running
- * the outer page. Products that have more is a real case — a garment in forty
- * colours and five sizes clears it — so the ones that report `hasNextPage` are
- * collected and finished off by `variantsOfProduct` below rather than silently
- * truncated. An export that quietly drops variants is worse than a slow one.
+ * That still grows with the number of metafield definitions, which is why the
+ * page size is computed from it. A store that adds its thirtieth variant
+ * metafield gets smaller pages, not a broken export.
  */
-async function readProducts(
-  admin: Admin,
-  definitions: DefinitionSet,
-  search: string | null,
-  limit: number,
-): Promise<VariantMetafields[]> {
-  const document = `#graphql
-    query VariantMetafieldsByProduct(
-      $cursor: String
-      $pageSize: Int!
-      $variantPageSize: Int!
-      $search: String
-    ) {
-      products(first: $pageSize, after: $cursor, query: $search, sortKey: TITLE) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          handle
-          title
-          ${metafieldSelections(definitions.product, "pmf")}
-          variants(first: $variantPageSize) {
-            pageInfo { hasNextPage }
-            nodes {
-              id
-              title
-              sku
-              selectedOptions { name value }
-              ${metafieldSelections(definitions.variant, "mf")}
-            }
-          }
-        }
-      }
-    }
-  `;
+const COST_BUDGET = 800;
 
-  const variants: VariantMetafields[] = [];
-  const truncated: ProductNode[] = [];
-  let cursor: string | null = null;
-
-  do {
-    const data: {
-      products: {
-        pageInfo: PageInfo;
-        nodes: (ProductNode & {
-          variants: { pageInfo: { hasNextPage: boolean }; nodes: VariantNode[] };
-        })[];
-      };
-    } = await query(admin, document, {
-      cursor,
-      pageSize: PRODUCT_PAGE_SIZE,
-      variantPageSize: VARIANT_PAGE_SIZE,
-      search,
-    });
-
-    for (const node of data.products.nodes) {
-      for (const variant of node.variants.nodes) {
-        variants.push(toVariantMetafields(variant, node, definitions));
-      }
-      if (node.variants.pageInfo.hasNextPage) truncated.push(node);
-    }
-
-    if (variants.length >= limit) {
-      throw new Error(
-        `This store has more than ${limit} variants. Export in slices rather than all at once.`,
-      );
-    }
-
-    cursor = data.products.pageInfo.hasNextPage
-      ? data.products.pageInfo.endCursor
-      : null;
-  } while (cursor);
-
-  // The overflow pass. Rare enough to be worth a second round trip per affected
-  // product and not worth complicating the query above for.
-  for (const product of truncated) {
-    const seen = new Set(
-      variants.filter((v) => v.productId === product.id).map((v) => v.id),
-    );
-    for (const variant of await variantsOfProduct(admin, definitions, product)) {
-      if (!seen.has(variant.id)) variants.push(variant);
-    }
-  }
-
-  return variants;
-}
-
-/** Every variant of one product, through the top-level connection. */
-async function variantsOfProduct(
-  admin: Admin,
-  definitions: DefinitionSet,
-  product: ProductNode,
-): Promise<VariantMetafields[]> {
-  // `product_id` takes the numeric id, not the gid.
-  const numericId = product.id.split("/").pop() ?? product.id;
-  const nodes = await readVariantConnection(
-    admin,
-    definitions,
-    `product_id:${numericId}`,
-  );
-
-  // The product's own metafields come from the node already in hand rather than
-  // being re-read per variant.
-  return nodes.map(({ node }) =>
-    toVariantMetafields(node, product, definitions),
+/** Cost of one variant node: the variant, its options, its product, its
+ *  metafields. */
+function variantPageSize(definitionCount: number): number {
+  return Math.min(
+    VARIANT_CONNECTION_PAGE_SIZE,
+    Math.max(5, Math.floor(COST_BUDGET / (3 + definitionCount))),
   );
 }
 
-/** Variants read through the top-level connection, with their product. */
+/** Products per product-metafield lookup, by the same reasoning. */
+function productNodeBatchSize(definitionCount: number): number {
+  return Math.min(
+    PRODUCT_NODE_BATCH_SIZE,
+    Math.max(1, Math.floor(COST_BUDGET / (1 + definitionCount))),
+  );
+}
+
+/**
+ * Variants read through the top-level connection, with their product.
+ *
+ * `search` is null for the full export and a filter expression otherwise — the
+ * same document either way, so there is one place where the metafield
+ * selections have to be right.
+ */
 async function readVariantConnection(
   admin: Admin,
   definitions: DefinitionSet,
-  search: string,
-): Promise<{ node: VariantNode; product: ProductNode }[]> {
+  search: string | null,
+  limit = MAX_VARIANTS,
+): Promise<VariantMetafields[]> {
   const document = `#graphql
     query VariantMetafieldsPage(
       $cursor: String
       $pageSize: Int!
-      $search: String!
+      $search: String
     ) {
       productVariants(first: $pageSize, after: $cursor, query: $search) {
         pageInfo { hasNextPage endCursor }
@@ -342,19 +259,14 @@ async function readVariantConnection(
           title
           sku
           selectedOptions { name value }
-          product {
-            id
-            handle
-            title
-            ${metafieldSelections(definitions.product, "pmf")}
-          }
+          product { id handle title }
           ${metafieldSelections(definitions.variant, "mf")}
         }
       }
     }
   `;
 
-  const found: { node: VariantNode; product: ProductNode }[] = [];
+  const found: VariantMetafields[] = [];
   let cursor: string | null = null;
 
   do {
@@ -365,12 +277,18 @@ async function readVariantConnection(
       };
     } = await query(admin, document, {
       cursor,
-      pageSize: VARIANT_CONNECTION_PAGE_SIZE,
+      pageSize: variantPageSize(definitions.variant.length),
       search,
     });
 
     for (const node of data.productVariants.nodes) {
-      found.push({ node, product: node.product });
+      found.push(toVariantMetafields(node, node.product, definitions));
+    }
+
+    if (found.length >= limit) {
+      throw new Error(
+        `This store has more than ${limit} variants. Export in slices rather than all at once.`,
+      );
     }
 
     cursor = data.productVariants.pageInfo.hasNextPage
@@ -381,12 +299,68 @@ async function readVariantConnection(
   return found;
 }
 
+/**
+ * Fill in each variant's product metafields, in a pass of their own.
+ *
+ * These cannot be selected on the `product` node inside the variant query: that
+ * multiplies their cost by the page size, and a store carrying Shopify's
+ * standard product metafields has enough of them to blow the single-query limit
+ * on its own. Reading them by id afterwards costs `products ÷ batch` small
+ * queries and is flat in the page size.
+ */
+async function attachProductMetafields(
+  admin: Admin,
+  definitions: RichTextDefinition[],
+  variants: VariantMetafields[],
+): Promise<VariantMetafields[]> {
+  if (definitions.length === 0 || variants.length === 0) return variants;
+
+  const document = `#graphql
+    query ProductMetafieldValues($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on Product {
+          id
+          ${metafieldSelections(definitions, "pmf")}
+        }
+      }
+    }
+  `;
+
+  const ids = [...new Set(variants.map((variant) => variant.productId))];
+  const batchSize = productNodeBatchSize(definitions.length);
+  const byProduct = new Map<string, Record<string, string>>();
+
+  for (let start = 0; start < ids.length; start += batchSize) {
+    const batch = ids.slice(start, start + batchSize);
+    const data = await query<{ nodes: (ProductNode | null)[] }>(
+      admin,
+      document,
+      { ids: batch },
+    );
+
+    for (const node of data.nodes) {
+      if (!node?.id) continue;
+      byProduct.set(node.id, readValues(node, definitions, "pmf"));
+    }
+  }
+
+  for (const variant of variants) {
+    variant.productValues = byProduct.get(variant.productId) ?? {};
+  }
+
+  return variants;
+}
+
 /** Every variant in the store, with its metafield values. Used by export. */
-export function getAllVariantMetafields(
+export async function getAllVariantMetafields(
   admin: Admin,
   definitions: DefinitionSet,
 ): Promise<VariantMetafields[]> {
-  return readProducts(admin, definitions, null, MAX_VARIANTS);
+  return attachProductMetafields(
+    admin,
+    definitions.product,
+    await readVariantConnection(admin, definitions, null),
+  );
 }
 
 /**
@@ -415,16 +389,76 @@ export async function getVariantMetafieldsBySkus(
     const batch = unique.slice(start, start + SEARCH_BATCH_SIZE);
     const search = batch.map((sku) => searchTerm("sku", sku)).join(" OR ");
 
-    for (const { node, product } of await readVariantConnection(
+    for (const variant of await readVariantConnection(
       admin,
       definitions,
       search,
     )) {
-      if (!node.sku || !wanted.has(node.sku.trim())) continue;
-      if (seen.has(node.id)) continue;
-      seen.add(node.id);
-      found.push(toVariantMetafields(node, product, definitions));
+      if (!variant.sku || !wanted.has(variant.sku.trim())) continue;
+      if (seen.has(variant.id)) continue;
+      seen.add(variant.id);
+      found.push(variant);
     }
+  }
+
+  return attachProductMetafields(admin, definitions.product, found);
+}
+
+/**
+ * The gids of the products a CSV names, by handle.
+ *
+ * `productVariants` has no handle filter, so the handles are turned into
+ * product ids first and the variants are then fetched by `product_id`. Reading
+ * the variants through the products connection instead would nest one
+ * connection inside another, which is the shape the cost limit refuses.
+ */
+async function productIdsByHandle(
+  admin: Admin,
+  handles: string[],
+): Promise<Map<string, string>> {
+  const document = `#graphql
+    query ProductIdsByHandle($pageSize: Int!, $search: String!, $cursor: String) {
+      products(first: $pageSize, after: $cursor, query: $search) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id handle }
+      }
+    }
+  `;
+
+  const wanted = new Set(handles);
+  const found = new Map<string, string>();
+
+  for (let start = 0; start < handles.length; start += SEARCH_BATCH_SIZE) {
+    const batch = handles.slice(start, start + SEARCH_BATCH_SIZE);
+    const search = batch
+      .map((handle) => searchTerm("handle", handle))
+      .join(" OR ");
+
+    let cursor: string | null = null;
+    do {
+      const data: {
+        products: {
+          pageInfo: PageInfo;
+          nodes: { id: string; handle: string }[];
+        };
+      } = await query(admin, document, {
+        pageSize: HANDLE_PAGE_SIZE,
+        search,
+        cursor,
+      });
+
+      for (const node of data.products.nodes) {
+        // `handle:` is exact, but an OR chain can still pull in a neighbour on
+        // a fuzzy tokenisation, so what comes back is filtered anyway.
+        if (wanted.has(node.handle.trim().toLowerCase())) {
+          found.set(node.handle.trim().toLowerCase(), node.id);
+        }
+      }
+
+      cursor = data.products.pageInfo.hasNextPage
+        ? data.products.pageInfo.endCursor
+        : null;
+    } while (cursor);
   }
 
   return found;
@@ -434,45 +468,44 @@ export async function getVariantMetafieldsBySkus(
  * Look up the variants of the products a CSV names, by product handle.
  *
  * The fallback for rows with no SKU, where a variant is identified by its
- * option values instead. Read through the products connection because
- * `productVariants` has no handle filter.
+ * option values instead.
  */
 export async function getVariantMetafieldsByProductHandles(
   admin: Admin,
   definitions: DefinitionSet,
   handles: string[],
 ): Promise<VariantMetafields[]> {
-  const wanted = new Set(
-    handles.map((handle) => handle.trim().toLowerCase()).filter(Boolean),
-  );
-  if (wanted.size === 0) return [];
+  const wanted = [
+    ...new Set(
+      handles.map((handle) => handle.trim().toLowerCase()).filter(Boolean),
+    ),
+  ];
+  if (wanted.length === 0) return [];
 
-  const unique = [...wanted];
+  const ids = await productIdsByHandle(admin, wanted);
+  if (ids.size === 0) return [];
+
+  // `product_id` takes the numeric id, not the gid.
+  const numeric = [...ids.values()].map((id) => id.split("/").pop() ?? id);
   const found: VariantMetafields[] = [];
   const seen = new Set<string>();
 
-  for (let start = 0; start < unique.length; start += SEARCH_BATCH_SIZE) {
-    const batch = unique.slice(start, start + SEARCH_BATCH_SIZE);
-    const search = batch
-      .map((handle) => searchTerm("handle", handle))
-      .join(" OR ");
+  for (let start = 0; start < numeric.length; start += SEARCH_BATCH_SIZE) {
+    const batch = numeric.slice(start, start + SEARCH_BATCH_SIZE);
+    const search = batch.map((id) => `product_id:${id}`).join(" OR ");
 
-    // `handle:` is an exact match, but the OR chain can still pull in a
-    // neighbour on a fuzzy tokenisation, so the result is filtered anyway.
-    for (const variant of await readProducts(
+    for (const variant of await readVariantConnection(
       admin,
       definitions,
       search,
-      MAX_VARIANTS,
     )) {
-      if (!wanted.has(variant.productHandle.trim().toLowerCase())) continue;
       if (seen.has(variant.id)) continue;
       seen.add(variant.id);
       found.push(variant);
     }
   }
 
-  return found;
+  return attachProductMetafields(admin, definitions.product, found);
 }
 
 // ---------------------------------------------------------------------------

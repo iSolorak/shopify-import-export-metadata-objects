@@ -31,7 +31,23 @@ import {
 //   definitions → what metafields does this store have on variants and products?
 //   values      → what is in them, for every variant?
 //   template    → what columns does the importer expect?
-export const loader = async ({ request }: LoaderFunctionArgs) => {
+// Every failure below is turned into a plain-text response carrying the real
+// message. Left to throw, an Admin API error reaches the browser as React
+// Router's "Unexpected Server Error" and the page has nothing useful to show —
+// which is exactly how a query cost limit looked before it was tracked down.
+export const loader = async (args: LoaderFunctionArgs) => {
+  try {
+    return await exportCsv(args);
+  } catch (error) {
+    if (error instanceof Response) throw error;
+    throw new Response(
+      error instanceof Error ? error.message : String(error),
+      { status: 500, headers: { "Content-Type": "text/plain; charset=utf-8" } },
+    );
+  }
+};
+
+const exportCsv = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
 
   const url = new URL(request.url);

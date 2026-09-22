@@ -399,3 +399,43 @@ appear in the export:
 - `buildMetaobjectIndex(admin, targets, { entries: false })` skips loading every
   entry of every referenced type. The export only needs the column set; the
   import needs the entries, because that is what turns `Peach` back into a gid.
+
+---
+
+## 11. Fix — query cost (the "Unexpected Server Error")
+
+Turning on **Include product metafields** failed with a bare 500. Cause: the
+Admin API enforces a **1,000-point ceiling on a single query**, checked before
+execution, and a connection costs `2 + first × (node cost)`.
+
+The original read nested one connection inside another:
+
+```
+products(first: 25) { variants(first: 100) { …, metafield ×D } }
+```
+
+which is `25 × (2 + 100 × (2 + D))` ≈ **12,550 points** at three variant
+definitions — over the limit before a product metafield was added. Adding the
+product columns just made it fail every time rather than most of the time.
+
+Two changes:
+
+1. **Flattened.** Every read now goes through the top-level `productVariants`
+   connection: one page costs `2 + first × (3 + D)`. The handle lookup resolves
+   handles to product ids first (`products(query: "handle:…")`, two scalars per
+   node) and then filters variants by `product_id`, so no query nests a
+   connection in a connection. `readProducts` and the nested-variant overflow
+   pass are gone with it.
+2. **Page sizes are derived, not chosen.** `variantPageSize(D)` and
+   `productNodeBatchSize(D)` divide an 800-point budget by the per-node cost, so
+   a store that adds its thirtieth definition gets smaller pages rather than a
+   broken export. Verified across 0–120 definitions: every shape lands between
+   302 and 802 points.
+
+Product metafields are read in a pass of their own (`attachProductMetafields`,
+by id) for the same reason — selecting them on the nested `product` node
+multiplied their cost by the page size.
+
+Separately, the export route now catches its own errors and returns the real
+message as a plain-text 500, which `downloadCsv` surfaces in the page's banner.
+The generic "Unexpected Server Error" is what made this cost this much to find.
