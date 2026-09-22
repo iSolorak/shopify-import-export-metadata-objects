@@ -18,6 +18,7 @@ import {
   collectReferenceIds,
   expandedColumns,
   metafieldColumns,
+  selectedColumns,
   variantDefinitionsToCsv,
   variantMetafieldTemplateCsv,
   variantMetafieldsToCsv,
@@ -62,6 +63,14 @@ const exportCsv = async ({ request }: LoaderFunctionArgs) => {
   // missing parameter means someone typed the URL by hand and wants the lot.
   const withProduct = url.searchParams.get("product") !== "0";
   const withExpanded = url.searchParams.get("expand") !== "0";
+  // The columns the picker ticked, as `metafieldColumns` names them. Absent
+  // means every column, so a URL typed by hand behaves as it always did.
+  const chosen = new Set(
+    (url.searchParams.get("fields") ?? "")
+      .split(",")
+      .map((field) => field.trim())
+      .filter(Boolean),
+  );
 
   const [variant, product] = await Promise.all([
     listMetafieldDefinitions(admin, "PRODUCTVARIANT"),
@@ -80,7 +89,29 @@ const exportCsv = async ({ request }: LoaderFunctionArgs) => {
     });
   }
 
-  const targets = metafieldColumns(definitions, withProduct);
+  const targets = selectedColumns(
+    metafieldColumns(definitions, withProduct),
+    chosen,
+  );
+  if (targets.length === 0) {
+    throw new Response(
+      "No columns chosen — tick at least one metafield to export.",
+      { status: 400 },
+    );
+  }
+
+  // Narrowed to what the chosen columns actually need, so an unticked product
+  // metafield is not read at all. Reading one costs a lookup per product, which
+  // makes the picker a saving rather than only a filter.
+  const needed: DefinitionSet = {
+    variant: targets
+      .filter((target) => target.owner === "PRODUCTVARIANT")
+      .map((target) => target.definition),
+    product: targets
+      .filter((target) => target.owner === "PRODUCT")
+      .map((target) => target.definition),
+  };
+
   let csv: string;
 
   if (kind === "template") {
@@ -93,7 +124,7 @@ const exportCsv = async ({ request }: LoaderFunctionArgs) => {
       await buildMetaobjectIndex(admin, targets, { entries: false }),
     );
   } else {
-    const variants = await getAllVariantMetafields(admin, definitions);
+    const variants = await getAllVariantMetafields(admin, needed);
     const { metaobjectIds, productIds } = collectReferenceIds(targets, variants);
 
     // Resolved from the gids actually present rather than by enumerating every

@@ -411,6 +411,86 @@ export async function getProductsForUpdate(
 }
 
 /**
+ * Products per page of the export.
+ *
+ * The selection is the same one the keyed lookups use, so the same warning
+ * applies: every node pulls media, variants, inventory levels and each chosen
+ * metafield, which makes this the heaviest query in the app.
+ * `HANDLE_BATCH_SIZE` settled on five aliased products; a connection costs less
+ * per node than an alias, but not by enough to be reckless — and every chosen
+ * metafield adds a field to each variant as well as to the product, so the
+ * budget shrinks as the picker fills up.
+ */
+function exportPageSize(
+  productRefs: MetafieldRef[],
+  variantRefs: MetafieldRef[],
+): number {
+  const refs = productRefs.length + variantRefs.length;
+  if (refs >= 20) return 5;
+  if (refs >= 10) return 10;
+  return 15;
+}
+
+/**
+ * Every product in the store, for the export.
+ *
+ * A generator rather than an array: a catalogue of several thousand products,
+ * each with its variants and metafields, is not something to hold in memory
+ * twice while a CSV is built beside it.
+ *
+ * `products(query:)` is the loose search that `getProductsForUpdate` documents
+ * as unsafe for *matching* a row to a product — but this is the opposite
+ * direction. Nothing is written, and the filter is the user's own: a wider
+ * match than they expected costs them extra rows in a file they are about to
+ * read, not a price written onto the wrong product.
+ */
+export async function* getAllProductsForExport(
+  admin: Admin,
+  options: {
+    productRefs: MetafieldRef[];
+    variantRefs: MetafieldRef[];
+    /** Shopify product search syntax, e.g. `status:active`. */
+    filter?: string;
+  },
+): AsyncGenerator<ExistingProduct> {
+  const { productRefs, variantRefs, filter } = options;
+  const selection = productSelection(productRefs, variantRefs);
+  const first = exportPageSize(productRefs, variantRefs);
+
+  const document = `#graphql
+    query ProductsForExport($cursor: String, $filter: String, $first: Int!) {
+      products(first: $first, after: $cursor, query: $filter, sortKey: TITLE) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          ${selection}
+        }
+      }
+    }
+  `;
+
+  let cursor: string | null = null;
+
+  do {
+    const data: {
+      products: { pageInfo: PageInfo; nodes: ProductNode[] };
+    } = await query(admin, document, {
+      cursor,
+      // An empty string is a filter matching nothing, so it has to be null.
+      filter: filter?.trim() ? filter.trim() : null,
+      first,
+    });
+
+    for (const node of data.products.nodes) {
+      yield toExistingProduct(node, productRefs, variantRefs);
+    }
+
+    cursor = data.products.pageInfo.hasNextPage
+      ? data.products.pageInfo.endCursor
+      : null;
+  } while (cursor);
+}
+
+/**
  * Look up products by title, for files with no handle column.
  *
  * Shopify's `title:` search is a prefix/fuzzy match, so everything it returns

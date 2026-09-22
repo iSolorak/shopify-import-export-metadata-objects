@@ -1,9 +1,14 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 
 import { authenticate } from "../shopify.server";
+import {
+  FieldPicker,
+  initialSelection,
+  type PickerGroup,
+} from "../components/FieldPicker";
 import { parseCsv, rowsToRecords } from "../lib/csv";
 import { downloadCsv } from "../lib/download-csv";
 import { listMetafieldDefinitions } from "../lib/product-metafields.server";
@@ -379,21 +384,64 @@ export default function VariantMetafieldsPage() {
   const [exporting, setExporting] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [refs, setRefs] = useState<"name" | "handle">("name");
-  const [withProduct, setWithProduct] = useState(true);
   const [withExpanded, setWithExpanded] = useState(true);
+
+  // The picker's groups are the store's own definitions, named by the column
+  // they produce — the same strings the export route filters on, so nothing has
+  // to be translated between the two.
+  const columnGroups: PickerGroup[] = useMemo(
+    () => [
+      {
+        name: "Variant metafields",
+        items: variant.map((definition) => ({
+          id: definition.column,
+          label: `${definition.name} (${definition.column})`,
+          details: definition.type,
+        })),
+      },
+      {
+        name: "Product metafields",
+        items: product.map((definition) => ({
+          id: `${PRODUCT_COLUMN_PREFIX}${definition.column}`,
+          label: `${definition.name} (${PRODUCT_COLUMN_PREFIX}${definition.column})`,
+          details: definition.type,
+        })),
+      },
+    ],
+    [variant, product],
+  );
+
+  // Everything on to begin with: the old behaviour, so a user who ignores the
+  // picker gets the file they got before it existed.
+  const [columns, setColumns] = useState<Set<string>>(() =>
+    initialSelection(columnGroups, () => true),
+  );
 
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
   const plan = data?.step === "plan" ? data.plan : null;
 
+  // Whether any product metafield survived the picker. The export route reads
+  // this separately because it decides whether to *fetch* product metafields at
+  // all, and fetching one costs a lookup per product.
+  const withProduct = [...columns].some((column) =>
+    column.startsWith(PRODUCT_COLUMN_PREFIX),
+  );
+
   const runExport = async (kind: string) => {
+    if (columns.size === 0) {
+      setExportError("Tick at least one metafield to export.");
+      return;
+    }
     setExporting(kind);
     setExportError(null);
     try {
       await downloadCsv(
         `/app/export-variant-metafields?kind=${kind}&refs=${refs}&product=${
           withProduct ? 1 : 0
-        }&expand=${withExpanded ? 1 : 0}`,
+        }&expand=${withExpanded ? 1 : 0}&fields=${encodeURIComponent(
+          [...columns].join(","),
+        )}`,
       );
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error));
@@ -534,13 +582,20 @@ export default function VariantMetafieldsPage() {
             <s-option value="handle">Handle (01-peach-radiant)</s-option>
           </s-select>
 
-          <s-checkbox
-            label="Include product metafields"
-            details={`Adds a ${PRODUCT_COLUMN_PREFIX} column for every metafield defined on products — shopify.color-pattern and the like — repeated on each variant of that product. These columns are importable: a value is written once per product, and rows of the same product that disagree are reported as errors rather than one of them silently winning.`}
-            defaultChecked
-            onChange={(event: { currentTarget: { checked: boolean } }) =>
-              setWithProduct(event.currentTarget.checked)
-            }
+          <s-paragraph>
+            Pick the columns below. <s-text>{PRODUCT_COLUMN_PREFIX}</s-text>{" "}
+            columns hold a metafield defined on the <strong>product</strong>,
+            repeated on each of its variants; they are importable, a value being
+            written once per product, and rows of the same product that disagree
+            are reported as errors rather than one of them silently winning.
+            Leaving them all unticked also makes the export cheaper — a product
+            metafield costs a lookup per product to read.
+          </s-paragraph>
+
+          <FieldPicker
+            groups={columnGroups}
+            selected={columns}
+            onChange={setColumns}
           />
 
           <s-checkbox

@@ -1,10 +1,17 @@
-import { useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
 
 import { authenticate } from "../shopify.server";
+import {
+  FieldPicker,
+  initialSelection,
+  type PickerGroup,
+  type PickerItem,
+} from "../components/FieldPicker";
 import { parseCsv, rowsToRecords } from "../lib/csv";
+import { downloadCsv } from "../lib/download-csv";
 import {
   STATIC_FIELDS,
   metafieldTargets,
@@ -139,8 +146,25 @@ type ActionData =
   | { step: "error"; message: string };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-  return null;
+  const { admin } = await authenticate.admin(request);
+
+  // For the export picker. The same catalogue the mapping dropdown is built
+  // from, which is the whole point: a column this page can export is a column
+  // it can read back, with no mapping step in between.
+  const [targets, locations] = await Promise.all([
+    buildTargets(admin),
+    listLocations(admin),
+  ]);
+
+  return {
+    exportFields: targets.map((target) => ({
+      field: target.field,
+      label: target.label,
+      group: groupOf(target),
+      scope: target.scope,
+    })),
+    locations,
+  };
 };
 
 type Admin = Parameters<typeof getProductsForUpdate>[0];
@@ -682,9 +706,80 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function ProductUpdatePage() {
+  const { exportFields, locations } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
+
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  const [exportLocation, setExportLocation] = useState(
+    locations[0]?.id ?? "",
+  );
+
+  // The picker's groups are the mapping dropdown's groups, in the same order,
+  // because they are built from the same targets by the same `groupOf`.
+  const exportGroups: PickerGroup[] = useMemo(() => {
+    const groups = new Map<string, PickerItem[]>();
+    for (const target of exportFields) {
+      const items = groups.get(target.group) ?? [];
+      items.push({
+        id: target.field,
+        label: target.label,
+        // Handle is how a row finds its product on the way back in. A file
+        // without it matches nothing, and producing one from the page whose
+        // job is importing would be a trap.
+        ...(target.field === "identity.handle"
+          ? {
+              locked: true,
+              details: "Always exported — rows are matched on it.",
+            }
+          : {}),
+      });
+      groups.set(target.group, items);
+    }
+    return [...groups.entries()].map(([name, items]) => ({ name, items }));
+  }, [exportFields]);
+
+  // Handle plus the fields a catalogue edit usually means. Everything else is
+  // one tick away, and exporting forty columns nobody asked for is the thing
+  // that makes a file unreadable in a spreadsheet.
+  const [exportColumns, setExportColumns] = useState<Set<string>>(() =>
+    initialSelection(exportGroups, (item) =>
+      [
+        "identity.title",
+        "variant.sku",
+        "variant.price",
+        "variant.compareAtPrice",
+      ].includes(item.id),
+    ),
+  );
+
+  const needsLocation = exportColumns.has("inventory.available");
+
+  const runExport = async () => {
+    if (exportColumns.size === 0) {
+      setExportError("Tick at least one field to export.");
+      return;
+    }
+    setExporting(true);
+    setExportError(null);
+    try {
+      const params = new URLSearchParams({
+        fields: [...exportColumns].join(","),
+      });
+      if (filter.trim()) params.set("query", filter.trim());
+      if (needsLocation && exportLocation) {
+        params.set("location", exportLocation);
+      }
+      await downloadCsv(`/app/export-products?${params}`);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const report =
     data && (data.step === "inspect" || data.step === "plan") ? data : null;
@@ -729,6 +824,82 @@ export default function ProductUpdatePage() {
 
   return (
     <s-page heading="Update products from CSV">
+      <s-section heading="Export products">
+        <s-stack direction="block" gap="base">
+          <s-paragraph>
+            Download the products you want to edit, with only the columns you
+            want to see, then edit the cells and bring the file back here.
+            The headings are Shopify&rsquo;s own, so the file you get{" "}
+            <strong>needs no mapping on the way back in</strong> — and
+            re-importing one you have not edited plans no changes at all, which
+            is the quickest way to check a column means what you think.
+          </s-paragraph>
+
+          <s-paragraph>
+            One row per variant, with the product&rsquo;s own columns filled on
+            its first row only — Shopify&rsquo;s layout, and what this page
+            reads natively. <strong>Handle</strong> is always included: it is
+            how each row finds its product again.
+          </s-paragraph>
+
+          {/* `event.target` rather than `currentTarget`, as the other
+              controlled text field in this app does: the change is dispatched
+              from the input inside the custom element. */}
+          <s-text-field
+            label="Only products matching"
+            details='Shopify product search, e.g. "status:active", "vendor:Radiant" or "tag:new". Leave blank for the whole catalogue.'
+            value={filter}
+            onChange={(event: Event) =>
+              setFilter((event.target as HTMLInputElement).value)
+            }
+          />
+
+          <FieldPicker
+            groups={exportGroups}
+            selected={exportColumns}
+            onChange={setExportColumns}
+          />
+
+          {needsLocation && locations.length > 0 && (
+            <s-select
+              label="Inventory quantities from"
+              details="Shopify exports one column per location; this writes one, because that is what the update step writes back."
+              onChange={(event: { currentTarget: { value: string } }) =>
+                setExportLocation(event.currentTarget.value)
+              }
+            >
+              {locations.map((location) => (
+                <s-option
+                  key={location.id}
+                  value={location.id}
+                  {...(location.id === exportLocation
+                    ? { defaultSelected: true }
+                    : {})}
+                >
+                  {location.name}
+                </s-option>
+              ))}
+            </s-select>
+          )}
+
+          {exportError && (
+            <s-banner tone="critical">
+              <s-paragraph>{exportError}</s-paragraph>
+            </s-banner>
+          )}
+
+          <div className={styles.actions}>
+            <s-button
+              variant="primary"
+              onClick={runExport}
+              {...(exporting ? { loading: true, disabled: true } : {})}
+            >
+              Download products CSV
+            </s-button>
+          </div>
+        </s-stack>
+      </s-section>
+
       <fetcher.Form
         method="post"
         encType="multipart/form-data"

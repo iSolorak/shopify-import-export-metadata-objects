@@ -97,6 +97,26 @@ export function metafieldColumns(
   return targets;
 }
 
+/**
+ * Keep only the columns the user ticked.
+ *
+ * `chosen` holds column names as `metafieldColumns` spells them — a variant
+ * definition's bare `namespace.key`, a product one's `product.`-prefixed form —
+ * so the picker's ids and these targets are the same strings and neither side
+ * has to translate.
+ *
+ * An empty set means "no filter", not "no columns": a hand-typed URL with no
+ * `fields` parameter should still export everything, the way it did before the
+ * picker existed.
+ */
+export function selectedColumns(
+  targets: ColumnTarget[],
+  chosen: Set<string>,
+): ColumnTarget[] {
+  if (chosen.size === 0) return targets;
+  return targets.filter((target) => chosen.has(target.column));
+}
+
 /** The stored value behind a target, for one variant. */
 function storedValue(variant: VariantMetafields, target: ColumnTarget): string {
   return target.owner === "PRODUCT"
