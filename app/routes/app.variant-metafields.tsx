@@ -6,8 +6,10 @@ import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import {
   FieldPicker,
+  allIds,
   initialSelection,
   type PickerGroup,
+  type PickerPreset,
 } from "../components/FieldPicker";
 import { parseCsv, rowsToRecords } from "../lib/csv";
 import { downloadCsv } from "../lib/download-csv";
@@ -417,6 +419,36 @@ export default function VariantMetafieldsPage() {
     initialSelection(columnGroups, () => true),
   );
 
+  const columnPresets: PickerPreset[] = useMemo(
+    () => [
+      { name: "Everything", ids: allIds(columnGroups) },
+      {
+        name: "Variant metafields only",
+        ids: variant.map((definition) => definition.column),
+      },
+      {
+        name: "Product metafields only",
+        ids: product.map(
+          (definition) => `${PRODUCT_COLUMN_PREFIX}${definition.column}`,
+        ),
+      },
+      {
+        name: "Pinned only",
+        ids: [
+          ...variant
+            .filter((definition) => definition.pinned)
+            .map((definition) => definition.column),
+          ...product
+            .filter((definition) => definition.pinned)
+            .map(
+              (definition) => `${PRODUCT_COLUMN_PREFIX}${definition.column}`,
+            ),
+        ],
+      },
+    ],
+    [columnGroups, variant, product],
+  );
+
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
   const plan = data?.step === "plan" ? data.plan : null;
@@ -596,6 +628,7 @@ export default function VariantMetafieldsPage() {
             groups={columnGroups}
             selected={columns}
             onChange={setColumns}
+            presets={columnPresets}
           />
 
           <s-checkbox
@@ -620,7 +653,8 @@ export default function VariantMetafieldsPage() {
               {...(exporting === "values" ? { loading: true } : {})}
               {...(exporting ? { disabled: true } : {})}
             >
-              Download variants CSV
+              Download variants CSV ({columns.size} column
+              {columns.size === 1 ? "" : "s"})
             </s-button>
             <s-button
               onClick={() => runExport("template")}

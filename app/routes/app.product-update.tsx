@@ -6,9 +6,11 @@ import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import {
   FieldPicker,
+  allIds,
   initialSelection,
   type PickerGroup,
   type PickerItem,
+  type PickerPreset,
 } from "../components/FieldPicker";
 import { parseCsv, rowsToRecords } from "../lib/csv";
 import { downloadCsv } from "../lib/download-csv";
@@ -742,17 +744,62 @@ export default function ProductUpdatePage() {
     return [...groups.entries()].map(([name, items]) => ({ name, items }));
   }, [exportFields]);
 
-  // Handle plus the fields a catalogue edit usually means. Everything else is
-  // one tick away, and exporting forty columns nobody asked for is the thing
-  // that makes a file unreadable in a spreadsheet.
+  // The answers people actually come here with. Each is a starting point
+  // rather than a mode: every one is a normal selection afterwards, and a
+  // preset naming a field this store does not have simply drops it.
+  const exportPresets: PickerPreset[] = useMemo(() => {
+    const metafields = exportFields
+      .filter((target) => target.field.startsWith("metafield."))
+      .map((target) => target.field);
+
+    return [
+      {
+        name: "Essentials",
+        ids: ["identity.title", "variant.sku", "variant.price"],
+      },
+      {
+        name: "Pricing",
+        ids: [
+          "identity.title",
+          "variant.sku",
+          "variant.price",
+          "variant.compareAtPrice",
+          "variant.cost",
+        ],
+      },
+      {
+        name: "Inventory",
+        ids: [
+          "identity.title",
+          "variant.sku",
+          "variant.barcode",
+          "inventory.available",
+          "variant.tracked",
+          "variant.inventoryPolicy",
+        ],
+      },
+      {
+        name: "Content & SEO",
+        ids: [
+          "identity.title",
+          "product.descriptionHtml",
+          "product.vendor",
+          "product.productType",
+          "product.tags",
+          "product.seoTitle",
+          "product.seoDescription",
+        ],
+      },
+      { name: "Metafields", ids: ["identity.title", ...metafields] },
+      { name: "Everything", ids: allIds(exportGroups) },
+    ];
+  }, [exportFields, exportGroups]);
+
+  // Opens on Essentials rather than on nothing: a picker whose answer is
+  // already reasonable is quicker to correct than one that starts empty.
   const [exportColumns, setExportColumns] = useState<Set<string>>(() =>
     initialSelection(exportGroups, (item) =>
-      [
-        "identity.title",
-        "variant.sku",
-        "variant.price",
-        "variant.compareAtPrice",
-      ].includes(item.id),
+      ["identity.title", "variant.sku", "variant.price"].includes(item.id),
     ),
   );
 
@@ -858,6 +905,7 @@ export default function ProductUpdatePage() {
             groups={exportGroups}
             selected={exportColumns}
             onChange={setExportColumns}
+            presets={exportPresets}
           />
 
           {needsLocation && locations.length > 0 && (
@@ -894,7 +942,8 @@ export default function ProductUpdatePage() {
               onClick={runExport}
               {...(exporting ? { loading: true, disabled: true } : {})}
             >
-              Download products CSV
+              Download {exportColumns.size} column
+              {exportColumns.size === 1 ? "" : "s"}
             </s-button>
           </div>
         </s-stack>

@@ -17,6 +17,12 @@
 > * **No test runner exists in this repo**, so step 6 was run as a standalone
 >   harness against the real modules rather than committed as a test. Adding
 >   vitest was out of scope for the ask.
+>
+> **Picker revised.** The first version was one flat column of every checkbox,
+> which is what a forty-field catalogue is worst served by. Now: presets, a
+> search that scopes "add all matches", groups collapsed behind counts, and the
+> selection shown back as removable chips in column order. The reasoning, and
+> the patterns each part comes from, are in `app/components/FieldPicker.tsx`.
 
 Two asks, one shared picker:
 

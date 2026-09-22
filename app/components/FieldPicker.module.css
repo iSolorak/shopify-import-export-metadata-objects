@@ -1,0 +1,114 @@
+/* Light-DOM wrappers around the Polaris web components, which style themselves
+   inside shadow DOM. Everything here is layout for the disclosure rows: Polaris
+   ships no accordion, so the groups are native <details>. */
+
+.group {
+  border: 1px solid #e3e3e3;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.group + .group {
+  margin-top: 0.5rem;
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 0.75rem;
+  background: #fbfbfb;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+/* The default triangle sits outside the flex row and misaligns the label. */
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+.summary::before {
+  content: "›";
+  display: inline-block;
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.group[open] > .summary::before {
+  transform: rotate(90deg);
+}
+
+.summary:hover {
+  background: #f1f1f1;
+}
+
+.summary:focus-visible {
+  outline: 2px solid #005bd3;
+  outline-offset: -2px;
+}
+
+/* Pushes the count to the right of the group name. */
+.count {
+  margin-left: auto;
+  font-weight: 400;
+  color: #616161;
+}
+
+.items {
+  padding: 0.75rem;
+  display: grid;
+  /* Two columns where there is room: these labels are short, and a single
+     column of forty checkboxes is the wall of ticks this replaced. */
+  grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
+  gap: 0.375rem 1rem;
+}
+
+/* Sits under the checkbox grid, inside the same disclosure. */
+.groupActions {
+  padding: 0 0.75rem 0.75rem;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.empty {
+  padding: 0.75rem;
+  color: #616161;
+  font-size: 0.8125rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .group {
+    border-color: #3a3a3a;
+  }
+
+  .summary {
+    background: #1a1a1a;
+  }
+
+  .summary:hover {
+    background: #242424;
+  }
+
+  .count {
+    color: #b5b5b5;
+  }
+
+  .empty {
+    color: #b5b5b5;
+  }
+}
