@@ -20,20 +20,24 @@ import {
   buildMetaobjectIndex,
   getVariantMetafieldsByProductHandles,
   getVariantMetafieldsBySkus,
+  type DefinitionSet,
   type VariantMetafields,
 } from "../lib/variant-metafields.server";
 import {
   HANDLE_COLUMN,
+  PRODUCT_COLUMN_PREFIX,
   SKU_COLUMN,
   type VariantImportPlan,
 } from "../lib/variant-metafield-columns";
 import {
   collectImportRefs,
+  metafieldColumns,
   planVariantMetafieldImport,
 } from "../lib/variant-metafield-csv.server";
 import styles from "./app._index/styles.module.css";
 
-// Export and update the metafields that live on product **variants**.
+// Export and update the metafields that live on product **variants**, together
+// with the product metafields that give them context.
 //
 // The rest of this app works a product at a time. A variant metafield does not
 // fit that shape: a colour family belongs to the Peach variant, not to the
@@ -43,7 +47,12 @@ import styles from "./app._index/styles.module.css";
 // `01-peach-radiant` handle — because a file nobody can read is a file nobody
 // can edit.
 //
-// `app.product-update.tsx` can already *write* variant metafields, but only as
+// Product metafields ride along in `product.`-prefixed columns, because the
+// values a merchant wants beside a variant — `shopify.color-pattern`, a size
+// chart — are usually defined on the product. They are writable, but only once
+// per product: see the planner's reconciliation step.
+//
+// `app.product-update.tsx` can already write variant metafields, but only as
 // part of a wider product import and only for products a file already names.
 // Nothing in the app could read them back out, which made the round trip this
 // page exists for impossible.
@@ -75,6 +84,7 @@ type ActionData =
   | {
       step: "applied";
       variants: number;
+      products: number;
       written: number;
       cleared: number;
       failures: string[];
@@ -84,7 +94,12 @@ type ActionData =
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
 
-  return { definitions: await listMetafieldDefinitions(admin, "PRODUCTVARIANT") };
+  const [variant, product] = await Promise.all([
+    listMetafieldDefinitions(admin, "PRODUCTVARIANT"),
+    listMetafieldDefinitions(admin, "PRODUCT"),
+  ]);
+
+  return { variant, product };
 };
 
 type Admin = Parameters<typeof resolveProductHandles>[0];
@@ -99,7 +114,7 @@ type Admin = Parameters<typeof resolveProductHandles>[0];
  */
 async function buildPlan(
   admin: Admin,
-  definitions: Awaited<ReturnType<typeof listMetafieldDefinitions>>,
+  definitions: DefinitionSet,
   csv: string,
   clearEmpty: boolean,
 ): Promise<
@@ -126,7 +141,18 @@ async function buildPlan(
     };
   }
 
-  const index = await buildMetaobjectIndex(admin, definitions);
+  // The product columns are only read — and only written — when the file
+  // actually carries one, so a plain variant file costs nothing extra.
+  const wantsProduct = headers.some((header) =>
+    header.startsWith(PRODUCT_COLUMN_PREFIX),
+  );
+  const targets = metafieldColumns(definitions, wantsProduct);
+  const reads: DefinitionSet = {
+    variant: definitions.variant,
+    product: wantsProduct ? definitions.product : [],
+  };
+
+  const index = await buildMetaobjectIndex(admin, targets);
 
   // Rows with a SKU are looked up by SKU; the rest fall back to their product's
   // handle plus the option columns, which is what a file for a store that does
@@ -142,8 +168,8 @@ async function buildPlan(
   }
 
   const [bySku, byHandle] = await Promise.all([
-    getVariantMetafieldsBySkus(admin, definitions, skus),
-    getVariantMetafieldsByProductHandles(admin, definitions, handles),
+    getVariantMetafieldsBySkus(admin, reads, skus),
+    getVariantMetafieldsByProductHandles(admin, reads, handles),
   ]);
 
   const variants: VariantMetafields[] = [];
@@ -158,7 +184,7 @@ async function buildPlan(
   // at a time inside it. Handles the entry index already knows cost nothing;
   // only the leftovers — a `mixed_reference` column, or a definition this
   // store restricts to nothing — reach the API.
-  const refs = collectImportRefs(definitions, records, index);
+  const refs = collectImportRefs(targets, records, index);
   const metaobjects = new Map(index.idByHandle);
   const missing = refs.metaobjects.filter(
     (ref) => !metaobjects.has(`${ref.type}:${ref.handle}`),
@@ -175,7 +201,7 @@ async function buildPlan(
 
   return {
     ok: true,
-    plan: planVariantMetafieldImport(definitions, records, variants, {
+    plan: planVariantMetafieldImport(targets, records, variants, {
       metaobjects,
       products,
       index,
@@ -192,8 +218,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const clearEmpty = formData.get(CLEAR_EMPTY_FIELD) != null;
 
   try {
-    const definitions = await listMetafieldDefinitions(admin, "PRODUCTVARIANT");
-    if (definitions.length === 0) {
+    const [variant, product] = await Promise.all([
+      listMetafieldDefinitions(admin, "PRODUCTVARIANT"),
+      listMetafieldDefinitions(admin, "PRODUCT"),
+    ]);
+    if (variant.length === 0 && product.length === 0) {
       return {
         step: "error",
         message:
@@ -206,7 +235,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return { step: "error", message: "Choose a CSV file first." } as const;
     }
 
-    const result = await buildPlan(admin, definitions, await file.text(), clearEmpty);
+    const result = await buildPlan(
+      admin,
+      { variant, product },
+      await file.text(),
+      clearEmpty,
+    );
     if (!result.ok) {
       return { step: "error", message: result.message } as const;
     }
@@ -228,8 +262,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         failures.push(`Row ${row.rowNumber}: ${row.message}`);
         continue;
       }
-      if (!row.variantId || row.action !== "update") continue;
-      variants++;
+      if (!row.variantId) continue;
+      if (row.writes.length || row.deletes.length) variants++;
 
       for (const write of row.writes) {
         writes.push({
@@ -251,6 +285,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             key: remove.key,
           },
           label: `Row ${row.rowNumber} (${row.label}) ${remove.column}`,
+        });
+      }
+    }
+
+    // One write per product, not one per row that named it — the planner has
+    // already collapsed the repeats and errored out any disagreement.
+    for (const change of result.plan.products) {
+      for (const write of change.writes) {
+        writes.push({
+          write: {
+            ownerId: change.productId,
+            namespace: write.namespace,
+            key: write.key,
+            type: write.type,
+            value: write.value,
+          },
+          label: `Product ${change.label} ${write.column}`,
+        });
+      }
+      for (const remove of change.deletes) {
+        removals.push({
+          remove: {
+            ownerId: change.productId,
+            namespace: remove.namespace,
+            key: remove.key,
+          },
+          label: `Product ${change.label} ${remove.column}`,
         });
       }
     }
@@ -294,7 +355,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    return { step: "applied", variants, written, cleared, failures } as const;
+    return {
+      step: "applied",
+      variants,
+      products: result.plan.products.length,
+      written,
+      cleared,
+      failures,
+    } as const;
   } catch (error) {
     return {
       step: "error",
@@ -304,13 +372,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function VariantMetafieldsPage() {
-  const { definitions } = useLoaderData<typeof loader>();
+  const { variant, product } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
   const formRef = useRef<HTMLFormElement>(null);
 
   const [exporting, setExporting] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [refs, setRefs] = useState<"name" | "handle">("name");
+  const [withProduct, setWithProduct] = useState(true);
+  const [withExpanded, setWithExpanded] = useState(true);
 
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
@@ -321,7 +391,9 @@ export default function VariantMetafieldsPage() {
     setExportError(null);
     try {
       await downloadCsv(
-        `/app/export-variant-metafields?kind=${kind}&refs=${refs}`,
+        `/app/export-variant-metafields?kind=${kind}&refs=${refs}&product=${
+          withProduct ? 1 : 0
+        }&expand=${withExpanded ? 1 : 0}`,
       );
     } catch (error) {
       setExportError(error instanceof Error ? error.message : String(error));
@@ -353,7 +425,7 @@ export default function VariantMetafieldsPage() {
     submitWith("plan")();
   };
 
-  if (definitions.length === 0) {
+  if (variant.length === 0 && product.length === 0) {
     return (
       <s-page heading="Variant metafields">
         <s-section heading="No variant metafields yet">
@@ -367,30 +439,41 @@ export default function VariantMetafieldsPage() {
     );
   }
 
+  const definitionRows = [
+    ...variant.map((definition) => ({ definition, owner: "variant" as const })),
+    ...product.map((definition) => ({ definition, owner: "product" as const })),
+  ];
+
   return (
     <s-page heading="Variant metafields">
       <s-section heading="Definitions">
         <s-stack direction="block" gap="base">
           <s-paragraph>
-            The {definitions.length} metafield definition(s) this store has on
-            variants. <strong>Pinned</strong> is worth checking: an unpinned
-            definition accepts values but never appears on the variant, which
+            {variant.length} definition(s) on variants and {product.length} on
+            products. <strong>Pinned</strong> is worth checking: an unpinned
+            definition accepts values but never appears in the admin, which
             looks exactly like an import that did nothing.
           </s-paragraph>
 
           <div className={styles.tableScroll}>
             <s-table>
               <s-table-header-row>
+                <s-table-header>Owner</s-table-header>
                 <s-table-header>Name</s-table-header>
                 <s-table-header>Column</s-table-header>
                 <s-table-header>Type</s-table-header>
                 <s-table-header>Pinned</s-table-header>
               </s-table-header-row>
               <s-table-body>
-                {definitions.map((definition) => (
+                {definitionRows.map(({ definition, owner }) => (
                   <s-table-row key={definition.id}>
+                    <s-table-cell>{owner}</s-table-cell>
                     <s-table-cell>{definition.name}</s-table-cell>
-                    <s-table-cell>{definition.column}</s-table-cell>
+                    <s-table-cell>
+                      {owner === "product"
+                        ? `${PRODUCT_COLUMN_PREFIX}${definition.column}`
+                        : definition.column}
+                    </s-table-cell>
                     <s-table-cell>{definition.type}</s-table-cell>
                     <s-table-cell>
                       <s-badge tone={definition.pinned ? "success" : "warning"}>
@@ -419,8 +502,8 @@ export default function VariantMetafieldsPage() {
         <s-stack direction="block" gap="base">
           <s-paragraph>
             Every variant, one row each, with the product&rsquo;s{" "}
-            <s-text>handle</s-text> and <s-text>title</s-text>, the variant
-            SKU and its options, then one column per metafield named{" "}
+            <s-text>handle</s-text> and <s-text>title</s-text>, the variant SKU
+            and its options, then one column per metafield named{" "}
             <s-text>namespace.key</s-text>. Edit the cells in a spreadsheet and
             import the file back here.
           </s-paragraph>
@@ -450,6 +533,24 @@ export default function VariantMetafieldsPage() {
             </s-option>
             <s-option value="handle">Handle (01-peach-radiant)</s-option>
           </s-select>
+
+          <s-checkbox
+            label="Include product metafields"
+            details={`Adds a ${PRODUCT_COLUMN_PREFIX} column for every metafield defined on products — shopify.color-pattern and the like — repeated on each variant of that product. These columns are importable: a value is written once per product, and rows of the same product that disagree are reported as errors rather than one of them silently winning.`}
+            defaultChecked
+            onChange={(event: { currentTarget: { checked: boolean } }) =>
+              setWithProduct(event.currentTarget.checked)
+            }
+          />
+
+          <s-checkbox
+            label="Expand referenced entries into their own columns"
+            details="Adds a read-only column per field of each referenced metaobject — 'custom.color_family > color' holds the color field of whatever entry that cell points at. References inside those fields are named one level deeper, so a color-pattern's colour reads as 'Peach' rather than a gid. Ignored on import: changing an entry's own fields is what the metaobject import on Import & export does."
+            defaultChecked
+            onChange={(event: { currentTarget: { checked: boolean } }) =>
+              setWithExpanded(event.currentTarget.checked)
+            }
+          />
 
           {exportError && (
             <s-banner tone="critical">
@@ -495,6 +596,16 @@ export default function VariantMetafieldsPage() {
             </s-paragraph>
 
             <s-paragraph>
+              <s-text>{PRODUCT_COLUMN_PREFIX}</s-text> columns write to the{" "}
+              <strong>product</strong>, once each, however many of its variants
+              the file lists. Two rows of the same product asking for different
+              values is an error on both — a product metafield has one value for
+              every variant. Columns containing{" "}
+              <s-text>&gt;</s-text> are expanded metaobject fields and are read
+              and ignored.
+            </s-paragraph>
+
+            <s-paragraph>
               An <strong>empty cell is skipped</strong>, never written as a
               blank, so a partly-filled spreadsheet cannot erase anything. A
               value that already matches is not written at all, so re-running
@@ -515,7 +626,7 @@ export default function VariantMetafieldsPage() {
             <s-checkbox
               name={CLEAR_EMPTY_FIELD}
               label="Clear metafields left empty"
-              details="Off, an empty cell is skipped and nothing is erased. On, an empty cell deletes the metafield on that variant — which is how you clear a discontinued value across a catalogue. Every clear is shown in the review step as a value → — change before anything is written."
+              details="Off, an empty cell is skipped and nothing is erased. On, an empty cell deletes the metafield on that variant or product — which is how you clear a discontinued value across a catalogue. Every clear is shown in the review step as a value → — change before anything is written."
               {...(data?.step === "plan" && data.clearEmpty
                 ? { defaultChecked: true }
                 : {})}
@@ -549,6 +660,11 @@ export default function VariantMetafieldsPage() {
                 <s-badge tone="neutral">
                   {plan.counts.unchanged} unchanged
                 </s-badge>
+                {plan.products.length > 0 && (
+                  <s-badge tone="info">
+                    {plan.products.length} product(s)
+                  </s-badge>
+                )}
                 {plan.counts.error > 0 && (
                   <s-badge tone="critical">
                     {plan.counts.error} with errors
@@ -559,10 +675,37 @@ export default function VariantMetafieldsPage() {
               {plan.unknownColumns.length > 0 && (
                 <s-banner tone="warning">
                   <s-paragraph>
-                    Ignored column(s) that are not a metafield on variants:{" "}
+                    Ignored column(s) that match no metafield definition:{" "}
                     {plan.unknownColumns.join(", ")}
                   </s-paragraph>
                 </s-banner>
+              )}
+
+              {plan.ignoredColumns.length > 0 && (
+                <s-banner tone="info">
+                  <s-paragraph>
+                    Read and ignored — expanded metaobject fields are never
+                    written back: {plan.ignoredColumns.join(", ")}
+                  </s-paragraph>
+                </s-banner>
+              )}
+
+              {plan.products.length > 0 && (
+                <s-stack direction="block" gap="small-300">
+                  <s-paragraph>
+                    <strong>Product metafields</strong> —{" "}
+                    {plan.productWriteCount} write(s) and{" "}
+                    {plan.productDeleteCount} clear(s), one per product however
+                    many rows asked for them.
+                  </s-paragraph>
+                  <s-unordered-list>
+                    {plan.products.slice(0, 20).map((change) => (
+                      <s-list-item key={change.productId}>
+                        {change.label}: {change.changes.join("; ")}
+                      </s-list-item>
+                    ))}
+                  </s-unordered-list>
+                </s-stack>
               )}
 
               {/* A wide plan table would otherwise push the whole embedded page
@@ -617,11 +760,20 @@ export default function VariantMetafieldsPage() {
                   variant="primary"
                   onClick={submitWith("apply")}
                   {...(busy ? { loading: true } : {})}
-                  {...(plan.writeCount + plan.deleteCount === 0
+                  {...(plan.writeCount +
+                    plan.deleteCount +
+                    plan.productWriteCount +
+                    plan.productDeleteCount ===
+                  0
                     ? { disabled: true }
                     : {})}
                 >
-                  Update {plan.counts.update} variant(s)
+                  Write{" "}
+                  {plan.writeCount +
+                    plan.deleteCount +
+                    plan.productWriteCount +
+                    plan.productDeleteCount}{" "}
+                  change(s)
                 </s-button>
               </div>
             </s-stack>
@@ -633,8 +785,9 @@ export default function VariantMetafieldsPage() {
             <s-stack direction="block" gap="base">
               <s-banner tone={data.failures.length ? "warning" : "success"}>
                 <s-paragraph>
-                  {data.variants} variant(s): {data.written} field(s) written,{" "}
-                  {data.cleared} cleared, {data.failures.length} failed.
+                  {data.variants} variant(s) and {data.products} product(s):{" "}
+                  {data.written} field(s) written, {data.cleared} cleared,{" "}
+                  {data.failures.length} failed.
                 </s-paragraph>
               </s-banner>
 

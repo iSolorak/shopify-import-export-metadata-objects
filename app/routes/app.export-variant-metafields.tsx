@@ -7,13 +7,17 @@ import {
   getAllVariantMetafields,
   resolveMetaobjectIds,
   resolveProductIds,
+  type DefinitionSet,
 } from "../lib/variant-metafields.server";
 import {
   variantMetafieldExportFilename,
   type RefStyle,
 } from "../lib/variant-metafield-columns";
 import {
+  collectEntryFieldIds,
   collectReferenceIds,
+  expandedColumns,
+  metafieldColumns,
   variantDefinitionsToCsv,
   variantMetafieldTemplateCsv,
   variantMetafieldsToCsv,
@@ -24,7 +28,7 @@ import {
 //
 // Three kinds, because they answer three different questions:
 //
-//   definitions → what variant metafields does this store have?
+//   definitions → what metafields does this store have on variants and products?
 //   values      → what is in them, for every variant?
 //   template    → what columns does the importer expect?
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -38,31 +42,43 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       : "values";
   const refs: RefStyle =
     url.searchParams.get("refs") === "handle" ? "handle" : "name";
+  // Both default on: the page's checkboxes always send an explicit value, so a
+  // missing parameter means someone typed the URL by hand and wants the lot.
+  const withProduct = url.searchParams.get("product") !== "0";
+  const withExpanded = url.searchParams.get("expand") !== "0";
 
-  const definitions = await listMetafieldDefinitions(admin, "PRODUCTVARIANT");
-  if (definitions.length === 0) {
-    throw new Response(
-      "This store has no metafield definitions on variants.",
-      { status: 404 },
-    );
+  const [variant, product] = await Promise.all([
+    listMetafieldDefinitions(admin, "PRODUCTVARIANT"),
+    listMetafieldDefinitions(admin, "PRODUCT"),
+  ]);
+  const definitions: DefinitionSet = {
+    variant,
+    // Reading a product metafield costs a lookup per product, so the columns
+    // are only asked for when something will carry them.
+    product: withProduct ? product : [],
+  };
+
+  if (variant.length === 0 && definitions.product.length === 0) {
+    throw new Response("This store has no metafield definitions on variants.", {
+      status: 404,
+    });
   }
 
+  const targets = metafieldColumns(definitions, withProduct);
   let csv: string;
 
   if (kind === "template") {
-    csv = variantMetafieldTemplateCsv(definitions);
+    csv = variantMetafieldTemplateCsv(targets);
   } else if (kind === "definitions") {
-    // Only for the `metaobject definition` column. Every other column comes
-    // straight off the definition, so a store with no reference metafields
-    // pays nothing for it.
-    const index = await buildMetaobjectIndex(admin, definitions);
-    csv = variantDefinitionsToCsv(definitions, index.typeByColumn);
+    // Only for the `metaobject definition` and `entry fields` columns. A store
+    // with no reference metafields pays nothing for it.
+    csv = variantDefinitionsToCsv(
+      targets,
+      await buildMetaobjectIndex(admin, targets, { entries: false }),
+    );
   } else {
     const variants = await getAllVariantMetafields(admin, definitions);
-    const { metaobjectIds, productIds } = collectReferenceIds(
-      definitions,
-      variants,
-    );
+    const { metaobjectIds, productIds } = collectReferenceIds(targets, variants);
 
     // Resolved from the gids actually present rather than by enumerating every
     // entry of every referenced definition: an export of a store with one
@@ -72,7 +88,25 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       resolveProductIds(admin, productIds),
     ]);
 
-    csv = variantMetafieldsToCsv(definitions, variants, {
+    let expanded: ReturnType<typeof expandedColumns> = [];
+    if (withExpanded) {
+      // One more level: a `shopify--color-pattern` entry's `color` field points
+      // at a `shopify--color` entry, and leaving that as a gid would defeat the
+      // point of expanding it at all. Two levels is where it stops.
+      for (const [id, ref] of await resolveMetaobjectIds(
+        admin,
+        collectEntryFieldIds(metaobjects),
+      )) {
+        metaobjects.set(id, ref);
+      }
+
+      expanded = expandedColumns(
+        targets,
+        await buildMetaobjectIndex(admin, targets, { entries: false }),
+      );
+    }
+
+    csv = variantMetafieldsToCsv(targets, expanded, variants, {
       metaobjects,
       products,
       refs,

@@ -3,14 +3,20 @@
 // Same conventions as the sibling server modules — a structural `Admin` type, a
 // private `query` helper that throws on transport errors, `#graphql`-tagged
 // documents — and the same reason for not sharing them: nothing here reads a
-// product's own metafields, and nothing in `product-metafields.server.ts` knows
-// what a variant is.
+// product's own metafields the way the rich text feature does, and nothing in
+// `product-metafields.server.ts` knows what a variant is.
 //
 // What this module adds over the existing product-side reads is the pair of
 // lookups the readable CSV needs: metaobject **gid → display name** for the
 // export, and metaobject **display name → gid** for the import. Every other
 // export in this app writes the stored API value or a handle, which is exactly
 // the thing a merchant cannot edit in a spreadsheet.
+//
+// A row is a variant, but it carries its product's metafields too. That is not
+// redundancy for its own sake: the values a merchant most often wants beside a
+// variant — `shopify.color-pattern`, a size chart, a care guide — are defined on
+// the *product*, and a file that omits them cannot answer "which variants are
+// the peach ones" without a second export to join against.
 
 import { getEntries } from "./metaobjects.server";
 import { METAOBJECT_TYPES, PRODUCT_REFERENCE_TYPES } from "./product-write.server";
@@ -28,13 +34,26 @@ type Admin = {
 type PageInfo = { hasNextPage: boolean; endCursor: string | null };
 
 /**
+ * The two owners a row touches, passed around together.
+ *
+ * Every read, every column and every write here is parameterised by both, and
+ * threading two arrays through a dozen signatures went wrong the first time the
+ * order was transposed. One object cannot be.
+ */
+export type DefinitionSet = {
+  variant: RichTextDefinition[];
+  product: RichTextDefinition[];
+};
+
+/**
  * Products per page.
  *
- * Each one carries up to `VARIANT_PAGE_SIZE` variants and every variant carries
- * one metafield lookup per definition, so this is by some distance the most
- * expensive query in the app. Twenty-five keeps a store with a dozen variant
- * definitions inside the query cost budget; the fifty the rich text export uses
- * would not, because that one reads a single metafield per *product*.
+ * Each one carries up to `VARIANT_PAGE_SIZE` variants, every variant carries one
+ * metafield lookup per variant definition, and the product carries one per
+ * product definition — by some distance the most expensive query in this app.
+ * Twenty-five keeps a store with a dozen definitions of each inside the query
+ * cost budget; the fifty the rich text export uses would not, because that one
+ * reads a single metafield per *product*.
  */
 const PRODUCT_PAGE_SIZE = 25;
 
@@ -60,7 +79,7 @@ const NODE_BATCH_SIZE = 100;
 export const MAX_VARIANTS = 20000;
 
 export type VariantMetafields = {
-  /** Variant gid — the owner every write in this section targets. */
+  /** Variant gid — the owner every variant write in this section targets. */
   id: string;
   sku: string | null;
   /** Variant title, e.g. `Peach / S`. */
@@ -71,6 +90,14 @@ export type VariantMetafields = {
   productTitle: string;
   /** `namespace.key` → stored API value (a gid, a JSON list, a plain string). */
   values: Record<string, string>;
+  /**
+   * The product's own metafields, by `namespace.key`.
+   *
+   * Repeated on every variant of the same product — a row is a variant, and a
+   * product metafield belongs to all of them. The planner is what stops that
+   * repetition turning into conflicting writes.
+   */
+  productValues: Record<string, string>;
 };
 
 async function query<T>(
@@ -104,22 +131,28 @@ function searchTerm(field: string, value: string): string {
 }
 
 /**
- * The aliased metafield selections for a variant.
+ * The aliased metafield selections for one owner.
  *
  * Indexed rather than derived from the key, for the reason
  * `product-metafields.server.ts` gives: a metafield key may contain characters
- * a GraphQL alias may not.
+ * a GraphQL alias may not. The prefix keeps the variant's aliases and its
+ * product's apart inside the one query.
  */
-function metafieldSelections(definitions: RichTextDefinition[]): string {
+function metafieldSelections(
+  definitions: RichTextDefinition[],
+  prefix: "mf" | "pmf",
+): string {
   return definitions
     .map(
       (definition, index) =>
-        `mf${index}: metafield(namespace: ${JSON.stringify(
+        `${prefix}${index}: metafield(namespace: ${JSON.stringify(
           definition.namespace,
         )}, key: ${JSON.stringify(definition.key)}) { value }`,
     )
     .join("\n            ");
 }
+
+type MetafieldNode = { value: string | null } | null;
 
 type VariantNode = {
   id: string;
@@ -128,19 +161,30 @@ type VariantNode = {
   selectedOptions: { name: string; value: string }[];
 } & Record<string, unknown>;
 
-type ProductContext = { id: string; handle: string; title: string };
+type ProductNode = {
+  id: string;
+  handle: string;
+  title: string;
+} & Record<string, unknown>;
+
+function readValues(
+  node: Record<string, unknown>,
+  definitions: RichTextDefinition[],
+  prefix: "mf" | "pmf",
+): Record<string, string> {
+  const values: Record<string, string> = {};
+  definitions.forEach((definition, index) => {
+    const field = node[`${prefix}${index}`] as MetafieldNode;
+    values[definition.column] = field?.value ?? "";
+  });
+  return values;
+}
 
 function toVariantMetafields(
   node: VariantNode,
-  product: ProductContext,
-  definitions: RichTextDefinition[],
+  product: ProductNode,
+  definitions: DefinitionSet,
 ): VariantMetafields {
-  const values: Record<string, string> = {};
-  definitions.forEach((definition, index) => {
-    const field = node[`mf${index}`] as { value: string | null } | null;
-    values[definition.column] = field?.value ?? "";
-  });
-
   return {
     id: node.id,
     sku: node.sku,
@@ -149,7 +193,8 @@ function toVariantMetafields(
     productId: product.id,
     productHandle: product.handle,
     productTitle: product.title,
-    values,
+    values: readValues(node, definitions.variant, "mf"),
+    productValues: readValues(product, definitions.product, "pmf"),
   };
 }
 
@@ -173,7 +218,7 @@ function toVariantMetafields(
  */
 async function readProducts(
   admin: Admin,
-  definitions: RichTextDefinition[],
+  definitions: DefinitionSet,
   search: string | null,
   limit: number,
 ): Promise<VariantMetafields[]> {
@@ -190,6 +235,7 @@ async function readProducts(
           id
           handle
           title
+          ${metafieldSelections(definitions.product, "pmf")}
           variants(first: $variantPageSize) {
             pageInfo { hasNextPage }
             nodes {
@@ -197,7 +243,7 @@ async function readProducts(
               title
               sku
               selectedOptions { name value }
-              ${metafieldSelections(definitions)}
+              ${metafieldSelections(definitions.variant, "mf")}
             }
           }
         }
@@ -206,14 +252,14 @@ async function readProducts(
   `;
 
   const variants: VariantMetafields[] = [];
-  const truncated: ProductContext[] = [];
+  const truncated: ProductNode[] = [];
   let cursor: string | null = null;
 
   do {
     const data: {
       products: {
         pageInfo: PageInfo;
-        nodes: (ProductContext & {
+        nodes: (ProductNode & {
           variants: { pageInfo: { hasNextPage: boolean }; nodes: VariantNode[] };
         })[];
       };
@@ -225,11 +271,10 @@ async function readProducts(
     });
 
     for (const node of data.products.nodes) {
-      const product = { id: node.id, handle: node.handle, title: node.title };
       for (const variant of node.variants.nodes) {
-        variants.push(toVariantMetafields(variant, product, definitions));
+        variants.push(toVariantMetafields(variant, node, definitions));
       }
-      if (node.variants.pageInfo.hasNextPage) truncated.push(product);
+      if (node.variants.pageInfo.hasNextPage) truncated.push(node);
     }
 
     if (variants.length >= limit) {
@@ -260,8 +305,8 @@ async function readProducts(
 /** Every variant of one product, through the top-level connection. */
 async function variantsOfProduct(
   admin: Admin,
-  definitions: RichTextDefinition[],
-  product: ProductContext,
+  definitions: DefinitionSet,
+  product: ProductNode,
 ): Promise<VariantMetafields[]> {
   // `product_id` takes the numeric id, not the gid.
   const numericId = product.id.split("/").pop() ?? product.id;
@@ -271,15 +316,19 @@ async function variantsOfProduct(
     `product_id:${numericId}`,
   );
 
-  return nodes.map(({ node }) => toVariantMetafields(node, product, definitions));
+  // The product's own metafields come from the node already in hand rather than
+  // being re-read per variant.
+  return nodes.map(({ node }) =>
+    toVariantMetafields(node, product, definitions),
+  );
 }
 
 /** Variants read through the top-level connection, with their product. */
 async function readVariantConnection(
   admin: Admin,
-  definitions: RichTextDefinition[],
+  definitions: DefinitionSet,
   search: string,
-): Promise<{ node: VariantNode; product: ProductContext }[]> {
+): Promise<{ node: VariantNode; product: ProductNode }[]> {
   const document = `#graphql
     query VariantMetafieldsPage(
       $cursor: String
@@ -293,21 +342,26 @@ async function readVariantConnection(
           title
           sku
           selectedOptions { name value }
-          product { id handle title }
-          ${metafieldSelections(definitions)}
+          product {
+            id
+            handle
+            title
+            ${metafieldSelections(definitions.product, "pmf")}
+          }
+          ${metafieldSelections(definitions.variant, "mf")}
         }
       }
     }
   `;
 
-  const found: { node: VariantNode; product: ProductContext }[] = [];
+  const found: { node: VariantNode; product: ProductNode }[] = [];
   let cursor: string | null = null;
 
   do {
     const data: {
       productVariants: {
         pageInfo: PageInfo;
-        nodes: (VariantNode & { product: ProductContext })[];
+        nodes: (VariantNode & { product: ProductNode })[];
       };
     } = await query(admin, document, {
       cursor,
@@ -330,7 +384,7 @@ async function readVariantConnection(
 /** Every variant in the store, with its metafield values. Used by export. */
 export function getAllVariantMetafields(
   admin: Admin,
-  definitions: RichTextDefinition[],
+  definitions: DefinitionSet,
 ): Promise<VariantMetafields[]> {
   return readProducts(admin, definitions, null, MAX_VARIANTS);
 }
@@ -347,7 +401,7 @@ export function getAllVariantMetafields(
  */
 export async function getVariantMetafieldsBySkus(
   admin: Admin,
-  definitions: RichTextDefinition[],
+  definitions: DefinitionSet,
   skus: string[],
 ): Promise<VariantMetafields[]> {
   const wanted = new Set(skus.map((sku) => sku.trim()).filter(Boolean));
@@ -385,7 +439,7 @@ export async function getVariantMetafieldsBySkus(
  */
 export async function getVariantMetafieldsByProductHandles(
   admin: Admin,
-  definitions: RichTextDefinition[],
+  definitions: DefinitionSet,
   handles: string[],
 ): Promise<VariantMetafields[]> {
   const wanted = new Set(
@@ -429,14 +483,19 @@ export type MetaobjectRef = {
   handle: string;
   displayName: string | null;
   type: string;
+  /** The entry's own fields, by key — what the expanded columns read. */
+  values: Record<string, string>;
 };
 
 /**
- * Resolve metaobject gids to their handle and display name, for the export.
+ * Resolve metaobject gids to their handle, display name and field values.
  *
  * Reads the entries directly rather than loading every entry of every type the
  * definitions allow: an export touches only the entries actually referenced,
  * and a `mixed_reference` column has no single definition to enumerate anyway.
+ *
+ * The fields come back in the same call the handle does, so expanding an entry
+ * into columns costs nothing extra once the entry has been resolved at all.
  */
 export async function resolveMetaobjectIds(
   admin: Admin,
@@ -449,7 +508,13 @@ export async function resolveMetaobjectIds(
   const document = `#graphql
     query MetaobjectRefs($ids: [ID!]!) {
       nodes(ids: $ids) {
-        ... on Metaobject { id handle displayName type }
+        ... on Metaobject {
+          id
+          handle
+          displayName
+          type
+          fields { key value }
+        }
       }
     }
   `;
@@ -462,15 +527,20 @@ export async function resolveMetaobjectIds(
         handle: string;
         displayName: string | null;
         type: string;
+        fields: { key: string; value: string | null }[];
       } | null)[];
     }>(admin, document, { ids: batch });
 
     for (const node of data.nodes) {
       if (!node?.id) continue;
+      const values: Record<string, string> = {};
+      for (const field of node.fields) values[field.key] = field.value ?? "";
+
       resolved.set(node.id, {
         handle: node.handle,
         displayName: node.displayName,
         type: node.type,
+        values,
       });
     }
   }
@@ -511,61 +581,82 @@ export async function resolveProductIds(
 }
 
 /**
- * Everything needed to turn a display name back into a gid, per metaobject type.
+ * Everything needed to turn a display name back into a gid, and to know which
+ * columns an entry expands into, per metaobject type.
  *
  * Built only for the definitions that are restricted to one metaobject
  * definition, because those are the only columns where a bare name is
- * unambiguous about *which* definition it belongs to. A `mixed_reference`
- * column keeps the `type:handle` form in both directions.
+ * unambiguous about *which* definition it belongs to, and the only ones whose
+ * expanded column set is known before the data is read. A `mixed_reference`
+ * column keeps the `type:handle` form and is never expanded.
  *
- * Display names are not unique. `byDisplayName` therefore holds an array, and
- * the planner reports a name matching several entries as an error rather than
- * resolving to whichever one the API happened to return first.
+ * Display names are not unique. `handlesByDisplayName` therefore holds an
+ * array, and the planner reports a name matching several entries as an error
+ * rather than resolving to whichever one the API happened to return first.
  */
 export type MetaobjectIndex = {
-  /** Metafield column (`namespace.key`) → the metaobject type it accepts. */
+  /** Metafield column (`namespace.key`, product ones prefixed) → entry type. */
   typeByColumn: Map<string, string>;
   /** `type:handle` → gid. */
   idByHandle: Map<string, string>;
-  /** `type:handle` → display name, for a readable ambiguity message. */
+  /** `type:normalised display name` → handles. */
   handlesByDisplayName: Map<string, string[]>;
+  /** Entry type → its field keys, in definition order. */
+  fieldKeysByType: Map<string, string[]>;
 };
 
 export const EMPTY_METAOBJECT_INDEX: MetaobjectIndex = {
   typeByColumn: new Map(),
   idByHandle: new Map(),
   handlesByDisplayName: new Map(),
+  fieldKeysByType: new Map(),
 };
 
+/**
+ * `entries` decides whether every entry of every referenced type is read.
+ *
+ * The import needs them — that is what turns "Peach" back into a gid. The
+ * export does not: it only wants `typeByColumn` and `fieldKeysByType` to know
+ * which columns exist, and resolves the entries it actually references by id
+ * instead. Loading a thousand-entry metaobject to name six of them is the
+ * difference between a fast export and a timed-out one.
+ */
 export async function buildMetaobjectIndex(
   admin: Admin,
-  definitions: RichTextDefinition[],
+  columns: { column: string; definition: RichTextDefinition }[],
+  options?: { entries?: boolean },
 ): Promise<MetaobjectIndex> {
   const index: MetaobjectIndex = {
     typeByColumn: new Map(),
     idByHandle: new Map(),
     handlesByDisplayName: new Map(),
+    fieldKeysByType: new Map(),
   };
 
   const definitionIds = [
     ...new Set(
-      definitions
+      columns
         .filter(
-          (definition) =>
+          ({ definition }) =>
             METAOBJECT_TYPES.includes(definition.type) &&
             definition.metaobjectDefinitionId,
         )
-        .map((definition) => definition.metaobjectDefinitionId!),
+        .map(({ definition }) => definition.metaobjectDefinitionId!),
     ),
   ];
   if (definitionIds.length === 0) return index;
 
-  // The definition carries the *id* of the metaobject definition; every lookup
-  // from here on needs its *type* string.
+  // The metafield definition carries the *id* of the metaobject definition;
+  // every lookup from here on needs its *type* string, and the expanded columns
+  // need its field keys.
   const document = `#graphql
     query MetaobjectDefinitionTypes($ids: [ID!]!) {
       nodes(ids: $ids) {
-        ... on MetaobjectDefinition { id type }
+        ... on MetaobjectDefinition {
+          id
+          type
+          fieldDefinitions { key }
+        }
       }
     }
   `;
@@ -574,20 +665,31 @@ export async function buildMetaobjectIndex(
   for (let start = 0; start < definitionIds.length; start += NODE_BATCH_SIZE) {
     const batch = definitionIds.slice(start, start + NODE_BATCH_SIZE);
     const data = await query<{
-      nodes: ({ id: string; type: string } | null)[];
+      nodes: ({
+        id: string;
+        type: string;
+        fieldDefinitions: { key: string }[];
+      } | null)[];
     }>(admin, document, { ids: batch });
 
     for (const node of data.nodes) {
-      if (node?.id) typeById.set(node.id, node.type);
+      if (!node?.id) continue;
+      typeById.set(node.id, node.type);
+      index.fieldKeysByType.set(
+        node.type,
+        node.fieldDefinitions.map((field) => field.key),
+      );
     }
   }
 
-  for (const definition of definitions) {
+  for (const { column, definition } of columns) {
     const type = definition.metaobjectDefinitionId
       ? typeById.get(definition.metaobjectDefinitionId)
       : undefined;
-    if (type) index.typeByColumn.set(definition.column, type);
+    if (type) index.typeByColumn.set(column, type);
   }
+
+  if (options?.entries === false) return index;
 
   for (const type of new Set(typeById.values())) {
     for (const entry of await getEntries(admin, type)) {

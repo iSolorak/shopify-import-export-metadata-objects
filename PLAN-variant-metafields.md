@@ -363,3 +363,39 @@ untouched file plans as all-`unchanged`.
 3. **Scale.** The all-variants export is unfiltered. If the store is large,
    the next increment is a filter (by product type / collection / definition)
    before the export, not a bigger timeout.
+
+---
+
+## 10. Extension — product metafields and expanded entries (built)
+
+Added after the first pass, on request. Three kinds of metafield column now
+appear in the export:
+
+| Column | Owner | Import |
+|---|---|---|
+| `custom.color_family` | variant | written |
+| `product.shopify.color-pattern` | product | written **once per product** |
+| `custom.color_family > color` | the referenced entry's own field | read and ignored |
+
+- **Product columns** are prefixed `product.` so the two owners cannot be
+  confused. The prefix cannot collide: a metafield key may not contain a dot,
+  so a variant column has exactly two dot-separated segments and a prefixed
+  product column has three.
+- **Writing them once** is the planner's reconciliation pass. A file with forty
+  rows for one product repeats its product cells forty times; identical repeats
+  collapse to one write, and rows that disagree are **all** reported as errors
+  rather than letting the last one win. Rows caught in a conflict write nothing
+  at all, variant cells included.
+- **Expanded columns** resolve references two levels deep: a
+  `shopify--color-pattern` entry's `color` field points at a `shopify--color`
+  entry, and that one is named rather than left as a gid. A third level stops.
+  They are read-only — changing an entry's own fields is what the metaobject
+  import on `/app` does, and it changes the value for every product referencing
+  it.
+- Both groups are **checkboxes on the export**, defaulting on, carried as
+  `&product=0|1&expand=0|1`. The import decides for itself: product columns are
+  read only when the file actually carries one, so a plain variant file costs
+  no extra queries.
+- `buildMetaobjectIndex(admin, targets, { entries: false })` skips loading every
+  entry of every referenced type. The export only needs the column set; the
+  import needs the entries, because that is what turns `Peach` back into a gid.

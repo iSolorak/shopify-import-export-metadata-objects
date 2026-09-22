@@ -43,8 +43,55 @@ export const IDENTITY_COLUMNS: string[] = [
   ...OPTION_COLUMNS,
 ];
 
+/**
+ * What a product metafield's column is called.
+ *
+ * Variant metafields keep the bare `namespace.key`, because they are what this
+ * section is for; a product's is prefixed so the two owners cannot be confused
+ * in a file that carries both — `shopify.color-pattern` is defined on the
+ * product, `custom.color_family` on the variant, and writing the wrong one is
+ * not a mistake the API would catch.
+ *
+ * The prefix cannot collide with a variant column. A metafield key may not
+ * contain a dot, so a variant column always has exactly two dot-separated
+ * segments and a prefixed product column always has three.
+ */
+export const PRODUCT_COLUMN_PREFIX = "product.";
+
+export function productColumnName(column: string): string {
+  return `${PRODUCT_COLUMN_PREFIX}${column}`;
+}
+
+/**
+ * What an expanded metaobject field's column is called.
+ *
+ * `custom.color_family > color` holds the `color` field of whatever entry
+ * `custom.color_family` points at. Read-only: writing it would mean editing the
+ * metaobject entry, which changes the value for every product referencing it —
+ * a different operation with different blast radius, and one the metaobject
+ * import page on `/app` already does properly.
+ */
+export const EXPANDED_SEPARATOR = " > ";
+
+export function expandedColumnName(column: string, fieldKey: string): string {
+  return `${column}${EXPANDED_SEPARATOR}${fieldKey}`;
+}
+
+export function isExpandedColumn(column: string): boolean {
+  return column.includes(EXPANDED_SEPARATOR);
+}
+
 /** How a metaobject reference is written out. */
 export type RefStyle = "name" | "handle";
+
+/** Which optional column groups an export includes. */
+export type ExportOptions = {
+  refs: RefStyle;
+  /** Product metafield columns. Exported and, unlike the next one, importable. */
+  productMetafields: boolean;
+  /** The referenced entries' own fields, expanded into read-only columns. */
+  expandEntries: boolean;
+};
 
 /** Normalised form for a display-name comparison. */
 export function normalizeDisplayName(value: string): string {
@@ -62,7 +109,9 @@ export function variantMetafieldExportFilename(
 // The plan, as the review table reads it
 // ---------------------------------------------------------------------------
 
-export type VariantWrite = {
+export type MetafieldOwner = "PRODUCT" | "PRODUCTVARIANT";
+
+export type PlannedWrite = {
   column: string;
   namespace: string;
   key: string;
@@ -70,7 +119,7 @@ export type VariantWrite = {
   value: string;
 };
 
-export type VariantDelete = {
+export type PlannedDelete = {
   column: string;
   namespace: string;
   key: string;
@@ -83,19 +132,45 @@ export type VariantRowPlan = {
   sku: string;
   /** Resolved once the row matched exactly one variant. */
   variantId?: string;
+  productId?: string;
   action: "update" | "unchanged" | "error";
   /** `column: old → new`, one per change, for the review table. */
   changes: string[];
   message?: string;
-  writes: VariantWrite[];
-  deletes: VariantDelete[];
+  writes: PlannedWrite[];
+  deletes: PlannedDelete[];
+};
+
+/**
+ * A product metafield change, hoisted out of the rows that asked for it.
+ *
+ * One row per variant means every variant of a product repeats that product's
+ * metafields, so a file of forty rows for one product asks for the same write
+ * forty times. Collapsing them here is what turns that into one write — and
+ * what makes a *disagreement* between those rows detectable at all, instead of
+ * the last row silently winning.
+ */
+export type ProductChange = {
+  productId: string;
+  /** The product's handle, for the review table. */
+  label: string;
+  /** Rows that asked for this change, for the message when they disagree. */
+  rowNumbers: number[];
+  writes: PlannedWrite[];
+  deletes: PlannedDelete[];
+  changes: string[];
 };
 
 export type VariantImportPlan = {
   rows: VariantRowPlan[];
+  products: ProductChange[];
   counts: { update: number; unchanged: number; error: number };
-  /** Columns in the file that are neither an identity column nor a definition. */
+  /** Columns in the file that match no definition and no identity column. */
   unknownColumns: string[];
+  /** Columns that are read and deliberately not written. */
+  ignoredColumns: string[];
   writeCount: number;
   deleteCount: number;
+  productWriteCount: number;
+  productDeleteCount: number;
 };
