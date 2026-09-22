@@ -11,7 +11,9 @@
 //     alone, never a creation and never a deletion;
 //   * variants the file does not mention are not touched;
 //   * a blank cell is skipped, so a half-filled spreadsheet cannot blank a
-//     field that already has content;
+//     field that already has content — unless the caller asks for the opposite
+//     with `clearEmpty`, which is a deliberate, per-run decision made in the UI
+//     and never the default;
 //   * a value equal to what the store already holds is not a change at all,
 //     which is what makes re-running a file free and a timed-out run safe to
 //     repeat.
@@ -60,6 +62,69 @@ export type ProductRow = {
   images: ImageRow[];
 };
 
+// ---------------------------------------------------------------------------
+// Clearing
+// ---------------------------------------------------------------------------
+
+/**
+ * Fields a blank cell is allowed to erase when `clearEmpty` is on.
+ *
+ * The list is an allowlist rather than "everything mapped", because for most
+ * columns a blank cell has no coherent meaning as an instruction:
+ *
+ *   * **Title, Handle, Status, Published, Variant SKU** — identity and required
+ *     state. There is no such thing as a product with no handle, and the SKU is
+ *     what a later run matches the variant by, so blanking it would make the
+ *     file un-re-runnable against its own effect.
+ *   * **Variant Price** — a variant always has a price; the API has no null to
+ *     set it to. A price of zero is a value, and belongs in the cell.
+ *   * **Taxable, Requires Shipping, Inventory Policy, Inventory Tracker** — a
+ *     boolean or an enum is never absent, only true or false, so a blank is a
+ *     missing answer rather than a request.
+ *   * **Variant Inventory Qty** — a blank is emphatically not zero, and reading
+ *     it as one would zero the stock of every product in a file that happens
+ *     not to carry quantities.
+ *   * **Weight** — value and unit are one measurement stored together, so a
+ *     blank in either column cannot be resolved into a single clear.
+ *   * **Image Src / Alt** — images here are append-only. Deleting media is a
+ *     different and much more destructive operation than blanking a field.
+ *
+ * Every metafield is clearable, whatever its type: clearing one deletes the
+ * record outright, which is well defined for all of them.
+ */
+const CLEARABLE_FIELDS = new Set([
+  "product.descriptionHtml",
+  "product.vendor",
+  "product.productType",
+  "product.tags",
+  "product.templateSuffix",
+  "product.seoTitle",
+  "product.seoDescription",
+  "product.category",
+  "variant.barcode",
+  "variant.compareAtPrice",
+  "variant.cost",
+  "variant.countryOfOrigin",
+  "variant.hsCode",
+]);
+
+/** Can a blank cell in this column be read as "erase what is there"? */
+export function isClearable(target: FieldTarget): boolean {
+  return target.metafield ? true : CLEARABLE_FIELDS.has(target.field);
+}
+
+/**
+ * How a request to clear travels from the grouper to the planner.
+ *
+ * `values` holds raw cell text and blanks were previously dropped on the way
+ * in, so an **empty string present in the map** is unambiguous: it can only
+ * have been put there by the clear pass, never by a cell with content. That is
+ * why `clearEmpty` needs no second map and no wrapper type — `has(field)` still
+ * means "the file says something about this field", and `get(field) === ""`
+ * means what it says is "nothing".
+ */
+const CLEAR = "";
+
 /**
  * Read a record's cell for a field, or null when the column is absent or blank.
  *
@@ -99,13 +164,37 @@ function cell(
  * SKU-keyed file is one row per variant and each row stands alone, with no
  * continuation rows to join. That is exactly what a supplier price list looks
  * like, which is the case it exists for.
+ *
+ * `clearEmpty` inverts what a blank cell means, for the clearable columns only
+ * (see CLEARABLE_FIELDS). It is applied here rather than in the planner because
+ * this is where blanks are dropped, and because the multi-row shape of a
+ * product export makes "is this cell blank" a question about the product rather
+ * than about one row: an export fills the product-level columns on the first
+ * row and leaves them blank on every continuation row, so a blank on row 3
+ * cannot be read as an instruction. A product-level field is cleared only when
+ * **every** row of that product left it blank, which is the same first-non-empty
+ * rule read to its end. Variant rows stand alone and are judged individually.
  */
 export function groupRows(
   records: Record<string, string>[],
   byColumn: Map<string, FieldTarget>,
+  clearEmpty = false,
 ): { rows: ProductRow[]; errors: string[] } {
   const has = (field: string) =>
     [...byColumn.values()].some((target) => target.field === field);
+
+  // The mapped columns a blank cell is allowed to erase, split by where the
+  // value lands. Empty unless the caller asked for clearing, which is what
+  // keeps the default path byte-for-byte what it was.
+  const clearableProduct: string[] = [];
+  const clearableVariant: string[] = [];
+  if (clearEmpty) {
+    for (const target of byColumn.values()) {
+      if (!isClearable(target)) continue;
+      if (target.scope === "product") clearableProduct.push(target.field);
+      else if (target.scope === "variant") clearableVariant.push(target.field);
+    }
+  }
 
   const matchedBy: MatchedBy = has("identity.handle")
     ? "handle"
@@ -226,8 +315,21 @@ export function groupRows(
     // only carries an image or a product-level field is not a variant row, and
     // treating it as one would produce a spurious "no matching variant" error
     // on every image row of a real export.
+    //
+    // Counted **before** the clears are added, and that ordering is the whole
+    // point: with `clearEmpty` on, filling in the blanks first would give every
+    // row a non-empty `values` map and turn each of a product's image rows into
+    // a variant row that matches nothing. A row earns its place by what it
+    // says, and only then is asked what it leaves out.
+    const stated = variantValues.size > 0 || optionValues.some(Boolean);
+
+    for (const field of clearableVariant) {
+      if (!variantValues.has(field)) variantValues.set(field, CLEAR);
+    }
+
+    // `variant.sku` is not clearable, so this still reads a real SKU or nothing.
     const sku = variantValues.get("variant.sku") ?? "";
-    if (variantValues.size > 0 || optionValues.some(Boolean)) {
+    if (stated) {
       product.variants.push({
         rowNumber,
         values: variantValues,
@@ -236,6 +338,15 @@ export function groupRows(
       });
     }
   });
+
+  // --- Product-level clears, once the whole file has been read --------------
+  // A field is cleared only if no row of the product ever filled it in, which
+  // is why this cannot happen inside the loop above.
+  for (const row of rows) {
+    for (const field of clearableProduct) {
+      if (!row.values.has(field)) row.values.set(field, CLEAR);
+    }
+  }
 
   return { rows, errors };
 }
@@ -268,6 +379,14 @@ export type MetafieldPlan = {
   key: string;
   type: string;
   value: string;
+  /**
+   * Delete the metafield instead of writing `value`.
+   *
+   * Set only by a blank cell under `clearEmpty`, and only when the metafield is
+   * actually there to remove. `value` is the empty string on these, and is not
+   * read by the writer.
+   */
+  remove?: boolean;
 };
 
 export type ProductPlan = {
@@ -438,6 +557,13 @@ function planProductFields(
   };
 
   for (const [field, value] of row.values) {
+    // A blank only reaches here when the run asked for clearing; the grouper
+    // drops it otherwise. See CLEAR.
+    if (value === CLEAR) {
+      clearProductField(field, product, input, seo, note);
+      continue;
+    }
+
     switch (field) {
       case "product.title": {
         if (product.title === value) break;
@@ -554,6 +680,79 @@ function planProductFields(
   return input;
 }
 
+/**
+ * Erase a product-level field, for a blank cell under `clearEmpty`.
+ *
+ * Only the fields in CLEARABLE_FIELDS ever arrive here — metafields are handled
+ * by the caller, since clearing one is a delete rather than a value. A field
+ * that is already empty is not a change, on the same principle that makes
+ * re-running a file free: the store is asked for a difference, not for a write.
+ */
+function clearProductField(
+  field: string,
+  product: ExistingProduct,
+  input: Record<string, unknown>,
+  seo: Record<string, string>,
+  note: (field: string, from: string, to: string) => void,
+): void {
+  switch (field) {
+    case "product.descriptionHtml": {
+      if (!product.descriptionHtml) return;
+      note(field, truncate(product.descriptionHtml), "");
+      input.descriptionHtml = "";
+      return;
+    }
+    case "product.vendor": {
+      if (!product.vendor) return;
+      note(field, product.vendor, "");
+      input.vendor = "";
+      return;
+    }
+    case "product.productType": {
+      if (!product.productType) return;
+      note(field, product.productType, "");
+      input.productType = "";
+      return;
+    }
+    case "product.tags": {
+      if (!product.tags.length) return;
+      note(field, [...product.tags].sort().join(", "), "");
+      input.tags = [];
+      return;
+    }
+    case "product.templateSuffix": {
+      if (!product.templateSuffix) return;
+      note(field, product.templateSuffix, "");
+      // null, not "": this resets the product to the theme's default template,
+      // which is what having no suffix means.
+      input.templateSuffix = null;
+      return;
+    }
+    case "product.seoTitle": {
+      if (!product.seoTitle) return;
+      note(field, product.seoTitle, "");
+      // Clearing the override, not the title itself — the storefront falls back
+      // to the product title, which is the state a product ships in.
+      seo.title = "";
+      return;
+    }
+    case "product.seoDescription": {
+      if (!product.seoDescription) return;
+      note(field, truncate(product.seoDescription), "");
+      seo.description = "";
+      return;
+    }
+    case "product.category": {
+      if (!product.categoryId) return;
+      note(field, product.categoryName ?? "", "");
+      input.category = null;
+      return;
+    }
+    default:
+      return;
+  }
+}
+
 /** Long HTML in a diff cell is unreadable; the point is that it differs. */
 function truncate(value: string, limit = 80): string {
   const collapsed = value.replace(/\s+/g, " ").trim();
@@ -588,6 +787,11 @@ function planVariant(
   };
 
   for (const [field, value] of row.values) {
+    if (value === CLEAR) {
+      clearVariantField(field, variant, input, inventoryItem, note);
+      continue;
+    }
+
     switch (field) {
       case "variant.sku": {
         if ((variant.sku ?? "") === value) break;
@@ -762,6 +966,59 @@ function planVariant(
   };
 }
 
+/**
+ * Erase a variant-level field, for a blank cell under `clearEmpty`.
+ *
+ * `null` rather than `""` throughout: these are nullable columns on the Admin
+ * API, and an empty-string barcode or HS code would be a stored empty value
+ * that a later export writes back out as a blank cell — indistinguishable from
+ * absence to the eye, but not to a `!== null` check anywhere downstream.
+ */
+function clearVariantField(
+  field: string,
+  variant: ExistingVariant,
+  input: Record<string, unknown>,
+  inventoryItem: Record<string, unknown>,
+  note: (field: string, from: string, to: string) => void,
+): void {
+  switch (field) {
+    case "variant.barcode": {
+      if (!variant.barcode) return;
+      note(field, variant.barcode, "");
+      input.barcode = null;
+      return;
+    }
+    case "variant.compareAtPrice": {
+      // The reason this feature tends to get asked for: a sale is over and the
+      // struck-through price has to come off the whole catalogue at once.
+      if (!variant.compareAtPrice) return;
+      note(field, variant.compareAtPrice, "");
+      input.compareAtPrice = null;
+      return;
+    }
+    case "variant.cost": {
+      if (!variant.cost) return;
+      note(field, variant.cost, "");
+      inventoryItem.cost = null;
+      return;
+    }
+    case "variant.countryOfOrigin": {
+      if (!variant.countryOfOrigin) return;
+      note(field, variant.countryOfOrigin, "");
+      inventoryItem.countryCodeOfOrigin = null;
+      return;
+    }
+    case "variant.hsCode": {
+      if (!variant.hsCode) return;
+      note(field, variant.hsCode, "");
+      inventoryItem.harmonizedSystemCode = null;
+      return;
+    }
+    default:
+      return;
+  }
+}
+
 function planWeight(
   row: VariantRow,
   variant: ExistingVariant,
@@ -887,15 +1144,38 @@ export function planProductUpdate(
       const target = metafieldTargets.get(field);
       if (!target?.metafield || target.metafield.owner !== "PRODUCT") continue;
 
+      const stored = product.metafields.get(
+        `${target.metafield.namespace}.${target.metafield.key}`,
+      );
+
+      // A blank cell under `clearEmpty`. There is nothing to convert — the
+      // metafield is removed, whatever its type.
+      if (value === CLEAR) {
+        if (!stored) continue;
+        changes.push({
+          field,
+          label: target.label,
+          from: truncate(stored),
+          to: "",
+        });
+        metafields.push({
+          ownerId: product.id,
+          namespace: target.metafield.namespace,
+          key: target.metafield.key,
+          type: target.metafield.type,
+          value: "",
+          remove: true,
+        });
+        continue;
+      }
+
       const converted = context.toMetafieldValue(target, value, context);
       if (!converted.ok) {
         errors.push(`${target.label}: ${converted.message}`);
         continue;
       }
 
-      const current = product.metafields.get(
-        `${target.metafield.namespace}.${target.metafield.key}`,
-      );
+      const current = stored;
       if (current === converted.value) continue;
 
       changes.push({
@@ -951,13 +1231,34 @@ export function planProductUpdate(
           continue;
         }
 
+        const key = `${target.metafield.namespace}.${target.metafield.key}`;
+
+        if (value === CLEAR) {
+          const stored = matched.metafields.get(key);
+          if (!stored) continue;
+          changes.push({
+            field,
+            label: `${target.label} (${matched.sku || matched.id})`,
+            from: truncate(stored),
+            to: "",
+          });
+          metafields.push({
+            ownerId: matched.id,
+            namespace: target.metafield.namespace,
+            key: target.metafield.key,
+            type: target.metafield.type,
+            value: "",
+            remove: true,
+          });
+          continue;
+        }
+
         const converted = context.toMetafieldValue(target, value, context);
         if (!converted.ok) {
           errors.push(`Row ${variantRow.rowNumber} ${target.label}: ${converted.message}`);
           continue;
         }
 
-        const key = `${target.metafield.namespace}.${target.metafield.key}`;
         if (matched.metafields.get(key) === converted.value) continue;
 
         changes.push({

@@ -622,6 +622,10 @@ overwrites the English products with Greek text.
 
 ## Companion documents
 
+- `SESSION-NOTES-2026-09.md` — **read this before debugging an import that
+  "should work"**. The September 2026 changes in brief, the traps that cost the
+  most time (owner subtype, variants not being products, stale app builds,
+  timestamps), and two confident claims that turned out to be wrong.
 - `PLAN-oscar-import.md` — the original migration design. **Partly superseded**:
   its `translationsRegister` section is not the route taken (Translate & Adapt
   CSV is), and its collections work is unbuilt.

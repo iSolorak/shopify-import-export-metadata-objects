@@ -19,6 +19,7 @@ import {
   type ProductRow,
 } from "../lib/product-import-csv";
 import {
+  deleteMetafields,
   findCategories,
   getProductsForUpdate,
   getProductsForUpdateBySku,
@@ -36,6 +37,7 @@ import {
   METAOBJECT_TYPES,
   PRODUCT_REFERENCE_TYPES,
   type ExistingProduct,
+  type MetafieldDelete,
   type MetafieldRef,
   type MetafieldWrite,
   type ShopLocation,
@@ -82,6 +84,24 @@ const MAPPING_PREFIX = "map:";
 const LOCATION_FIELD = "locationId";
 
 /**
+ * The one switch that reverses this page's central safety rule.
+ *
+ * Off, a blank cell is skipped and a half-filled spreadsheet cannot erase
+ * anything — the property the whole feature is built around. On, a blank cell
+ * in a clearable column means "erase what is there", which is what a merchant
+ * ending a sale across the catalogue actually wants: export, delete the
+ * Compare At Price column's contents, re-import.
+ *
+ * It is deliberately one checkbox rather than a per-column choice. The mapping
+ * table already decides *which* columns are in play — switching a column off
+ * there removes it from the run entirely, blanks included — so a per-column
+ * clear flag would be a second, overlapping way to say the same thing. The
+ * review step shows every clear as a real `value → —` diff before anything is
+ * written, which is where the per-case judgement belongs.
+ */
+const CLEAR_EMPTY_FIELD = "clearEmpty";
+
+/**
  * Products per run.
  *
  * Each one costs up to four Admin API calls, and
@@ -104,6 +124,8 @@ type ColumnReport = {
   targets: { field: string; label: string; group: string }[];
   locations: ShopLocation[];
   locationId: string;
+  /** Echoed back so the checkbox survives the round trip between steps. */
+  clearEmpty: boolean;
 };
 
 type ActionData =
@@ -184,6 +206,7 @@ async function buildPlan(
   mapping: Record<string, string>,
   locationId: string,
   targets: FieldTarget[],
+  clearEmpty: boolean,
 ): Promise<
   | {
       ok: true;
@@ -226,7 +249,7 @@ async function buildPlan(
   }
 
   const records = rowsToRecords(rows);
-  const grouped = groupRows(records, resolved.byColumn);
+  const grouped = groupRows(records, resolved.byColumn, clearEmpty);
 
   if (grouped.rows.length > MAX_PRODUCTS) {
     return {
@@ -483,6 +506,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const userMapping = readMapping(formData);
     const locationId =
       String(formData.get(LOCATION_FIELD) ?? "") || locations[0]?.id || "";
+    // An unchecked checkbox posts nothing at all, so presence is the answer.
+    const clearEmpty = formData.get(CLEAR_EMPTY_FIELD) !== null;
 
     const report = (
       resolved: ReturnType<typeof resolveHeaders>,
@@ -500,6 +525,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       })),
       locations,
       locationId,
+      clearEmpty,
     });
 
     // --- Step 1: read the file and report what its columns mean -------------
@@ -519,7 +545,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // --- Step 2: plan -------------------------------------------------------
-    const built = await buildPlan(admin, csv, userMapping, locationId, targets);
+    const built = await buildPlan(
+      admin,
+      csv,
+      userMapping,
+      locationId,
+      targets,
+      clearEmpty,
+    );
     if (!built.ok) return { step: "error", message: built.message } as const;
 
     if (intent !== "apply") {
@@ -592,17 +625,43 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           else failures.push(`${label} (inventory): ${result.errors.join("; ")}`);
         }
 
-        if (product.metafields.length) {
-          const writes: MetafieldWrite[] = product.metafields.map((entry) => ({
-            ownerId: entry.ownerId,
-            namespace: entry.namespace,
-            key: entry.key,
-            type: entry.type,
-            value: entry.value,
-          }));
+        // Values and removals travel in the same plan but through different
+        // mutations: a cleared metafield is deleted, because no typed metafield
+        // accepts the empty string as a value.
+        const writes: MetafieldWrite[] = [];
+        const removals: MetafieldDelete[] = [];
+        for (const entry of product.metafields) {
+          if (entry.remove) {
+            removals.push({
+              ownerId: entry.ownerId,
+              namespace: entry.namespace,
+              key: entry.key,
+            });
+          } else {
+            writes.push({
+              ownerId: entry.ownerId,
+              namespace: entry.namespace,
+              key: entry.key,
+              type: entry.type,
+              value: entry.value,
+            });
+          }
+        }
+
+        if (writes.length) {
           const result = await setMetafields(admin, writes);
           if (result.ok) wrote = true;
           else failures.push(`${label} (metafields): ${result.errors.join("; ")}`);
+        }
+
+        if (removals.length) {
+          const result = await deleteMetafields(admin, removals);
+          if (result.ok) wrote = true;
+          else {
+            failures.push(
+              `${label} (cleared metafields): ${result.errors.join("; ")}`,
+            );
+          }
         }
 
         if (wrote) updated++;
@@ -689,9 +748,11 @@ export default function ProductUpdatePage() {
 
             <s-paragraph>
               An <strong>empty cell is skipped</strong>, never written as a
-              blank, so a partly-filled spreadsheet cannot erase anything. A
-              value that already matches is not written at all, so re-running the
-              same file is free and a run that times out is safe to repeat.
+              blank, so a partly-filled spreadsheet cannot erase anything —
+              unless you turn on <strong>Clear fields left empty</strong> in the
+              next step, which reverses that for this run only. A value that
+              already matches is not written at all, so re-running the same file
+              is free and a run that times out is safe to repeat.
             </s-paragraph>
 
             <s-paragraph>
@@ -779,6 +840,16 @@ export default function ProductUpdatePage() {
                   </s-unordered-list>
                 </s-stack>
               )}
+
+              {/* Placed above the mapping table on purpose: it changes what
+                  every row of that table means, so reading it afterwards would
+                  be reading it too late. */}
+              <s-checkbox
+                name={CLEAR_EMPTY_FIELD}
+                label="Clear fields left empty"
+                details="Off, an empty cell is skipped and nothing is erased. On, an empty cell erases what the product currently holds — for Body, Vendor, Type, Tags, Template Suffix, SEO, Category, Compare At Price, Cost, Barcode, Country of Origin, HS Code and any metafield column. Title, Handle, Status, SKU, Price and Inventory Qty are never cleared, and images are never removed. Every clear is shown in the review step before anything is written."
+                {...(report.clearEmpty ? { defaultChecked: true } : {})}
+              />
 
               {report.locations.length > 0 && (
                 <s-select
@@ -878,6 +949,16 @@ export default function ProductUpdatePage() {
                   </s-badge>
                 )}
               </s-stack>
+
+              {report?.clearEmpty && (
+                <s-banner tone="warning">
+                  <s-paragraph>
+                    <strong>Clear fields left empty</strong> is on. Every change
+                    ending in &ldquo;&mdash;&rdquo; below erases what the product
+                    currently holds. Check those before applying.
+                  </s-paragraph>
+                </s-banner>
+              )}
 
               {plan.errors.length > 0 && (
                 <s-banner tone="warning">

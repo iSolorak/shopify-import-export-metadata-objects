@@ -1176,3 +1176,50 @@ export async function setMetafields(
 
   return { ok: errors.length === 0, errors };
 }
+
+// Clearing a metafield is a *delete*, not `metafieldsSet` with an empty string:
+// every typed metafield validates its value, so `""` is rejected outright for a
+// number, a date or a reference, and for the few types that would accept it the
+// result is an empty metafield still attached to the product rather than an
+// absent one. `metafieldsDelete` removes the record, which is what "clear this
+// field" has to mean if a subsequent export is to round-trip.
+const METAFIELDS_DELETE = `#graphql
+  mutation DeleteProductImportMetafields(
+    $metafields: [MetafieldIdentifierInput!]!
+  ) {
+    metafieldsDelete(metafields: $metafields) {
+      deletedMetafields { key namespace ownerId }
+      userErrors { field message }
+    }
+  }
+`;
+
+export type MetafieldDelete = {
+  ownerId: string;
+  namespace: string;
+  key: string;
+};
+
+/**
+ * Remove metafields from products and variants alike.
+ *
+ * Only ever called for a metafield the planner has already seen a value for, so
+ * a blank cell against a metafield that was never set is not a write at all.
+ */
+export async function deleteMetafields(
+  admin: Admin,
+  removals: MetafieldDelete[],
+): Promise<{ ok: boolean; errors: string[] }> {
+  const errors: string[] = [];
+
+  for (let start = 0; start < removals.length; start += METAFIELD_BATCH_SIZE) {
+    const batch = removals.slice(start, start + METAFIELD_BATCH_SIZE);
+    const data = await query<{
+      metafieldsDelete: { userErrors: UserError[] };
+    }>(admin, METAFIELDS_DELETE, { metafields: batch });
+
+    errors.push(...formatUserErrors(data.metafieldsDelete.userErrors));
+  }
+
+  return { ok: errors.length === 0, errors };
+}
