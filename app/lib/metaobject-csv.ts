@@ -44,6 +44,30 @@ export const DISPLAY_NAME_COLUMN = "display_name";
  */
 export const STATUS_COLUMN = "status";
 
+/**
+ * Metaobject type whose entries Shopify names after the product they came from.
+ *
+ * A swatch auto-created from a product option is labelled
+ * `03 NATURAL BEIGE (Matt Plus Liquid Foundation SPF20)` — the colour name with
+ * the owning product's title bolted on. The product is not part of the colour,
+ * and the same shade reused across a range gets a different label on every
+ * product, so the trailing parenthetical is dropped on export. Nothing on the
+ * import side changes: a file that still carries the suffix imports as before.
+ */
+const COLOR_PATTERN_TYPE = "shopify--color-pattern";
+
+/** Field holding the swatch name when the definition names no other. */
+const DEFAULT_LABEL_KEY = "label";
+
+/** A trailing `(...)` — the product title Shopify appends — and its spacing. */
+const PRODUCT_SUFFIX = /\s*\([^()]*\)\s*$/;
+
+function stripProductSuffix(value: string): string {
+  // A label that is *nothing but* a parenthetical has no other identity, so it
+  // is left alone rather than exported as an empty cell.
+  return value.replace(PRODUCT_SUFFIX, "").trim() || value;
+}
+
 /** Columns of the definition CSV, one row per field definition. */
 export const DEFINITION_COLUMNS = [
   "type",
@@ -78,11 +102,21 @@ export function entriesToCsv(definition: Definition, entries: Entry[]): string {
     ...fieldKeys,
   ];
 
+  // Only the colour swatches carry the product title; every other type's names
+  // are the merchant's own and are written out untouched.
+  const trimNames = definition.type === COLOR_PATTERN_TYPE;
+  const labelKey = definition.displayNameKey || DEFAULT_LABEL_KEY;
+  const clean = (value: string) =>
+    trimNames ? stripProductSuffix(value) : value;
+
   const rows = entries.map((entry) => [
     entry.handle,
-    entry.displayName ?? "",
+    clean(entry.displayName ?? ""),
     ...(withStatus ? [entry.status ?? ""] : []),
-    ...fieldKeys.map((key) => entry.values[key] ?? ""),
+    ...fieldKeys.map((key) => {
+      const value = entry.values[key] ?? "";
+      return key === labelKey ? clean(value) : value;
+    }),
   ]);
 
   return toCsv([header, ...rows]);
