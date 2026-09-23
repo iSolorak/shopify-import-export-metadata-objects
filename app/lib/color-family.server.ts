@@ -4,21 +4,34 @@
 // only as one of however many metafields a store defines, and only ever as an
 // *assignment* — the entry behind `Peach Tones` is edited somewhere else
 // entirely, on the metaobject page, in a file that knows nothing about which
-// variants are affected. This section is the two halves in one sheet:
+// variants are affected. This section is both halves in one sheet:
 //
-//   `color family`      → which family the variant is in     (variant metafield)
+//   `color family`      → which family the variant is in
 //   `color family hex`  → what that family looks like        (metaobject entry)
-//   `shopify color`     → the standard colour behind it      (read-only)
+//   `shopify color`     → the standard colour on the variant (read-only)
 //
-// A row is a **variant**, so the third column can exist at all: the Shopify
-// standard colour is reached by following the family's own reference, or the
-// variant's `color-pattern` metafield, and neither is addressable from a
-// family-per-row sheet.
+// ## The positional list
+//
+// A store may hold the assignment on the variant, which is simple. This one
+// holds it on the **product**, as a list whose Nth entry belongs to the Nth
+// variant — exactly the shape Shopify's own `shopify.color-pattern` uses, and
+// the reason a row can show a variant's colour at all:
+//
+//   advanced-care-lipstick-matt   mt-200-mellow-…;mt-201-caramel-…;mt-202-…
+//     variant 1  SKU 59103200  →  mt-200-mellow-…
+//     variant 2  SKU 59103201  →  mt-201-caramel-…
+//
+// Two consequences run through everything below. A list cannot have holes, so
+// one variant changing family means rewriting the product's whole list, which
+// means every variant of that product has to be accounted for — including the
+// ones the file never mentions. And the position that decides where a value
+// lands is read from the **store**, never from the file: rows are matched by
+// SKU and then placed by `ProductVariant.position`, so sorting or filtering the
+// spreadsheet cannot misalign anything.
 //
 // The two writable halves have very different blast radius, which is why the
 // planner separates them: assigning a family touches one variant, editing a
-// family's hex touches every variant in it. The review step names both, and the
-// entry edits are collapsed and cross-checked before anything is written.
+// family's hex touches every variant in it. The review step names both.
 
 import { toCsv } from "./csv";
 import {
@@ -32,10 +45,7 @@ import {
   type MetafieldOwner,
   type RichTextDefinition,
 } from "./product-metafields.server";
-import {
-  METAOBJECT_TYPES,
-  toMetafieldValue,
-} from "./product-write.server";
+import { METAOBJECT_TYPES } from "./product-write.server";
 import {
   buildMetaobjectIndex,
   type MetaobjectIndex,
@@ -54,6 +64,7 @@ import {
   FAMILY_HANDLE_COLUMN,
   FAMILY_HEX_COLUMN,
   IDENTITY_COLUMNS,
+  POSITION_COLUMN,
   READ_ONLY_COLUMNS,
   SHOPIFY_COLOR_COLUMN,
   SHOPIFY_COLOR_HEX_COLUMN,
@@ -62,6 +73,7 @@ import {
   type ColorFamilyPlan,
   type ColorFamilyRowPlan,
   type FamilyEntryChange,
+  type ProductFamilyChange,
   type RefStyle,
 } from "./color-family";
 
@@ -76,31 +88,34 @@ type Admin = Parameters<typeof listDefinitions>[0];
  *
  * Nothing here is hard-coded to a type string. A store may call the definition
  * `color_family`, `colour_family` or `shade_family`, may key the hex field
- * `color`, `hex` or `swatch`, and may hang the standard colour off the family
- * or off the product. Guessing wrong writes to the wrong place silently, so
- * every one of those is discovered from the store's own definitions and the
- * result is shown on the page before anything is exported.
+ * `color`, `hex` or `swatch`, and may hang the assignment off the variant or
+ * off the product. Guessing wrong writes to the wrong place silently, so every
+ * one of those is discovered from the store's own definitions, and what was
+ * found is shown on the page before anything is exported.
  */
 export type ColorFamilySetup = {
   /** The colour family metaobject definition itself. */
   definition: Definition;
-  /** The variant metafield that points at it. Where an assignment is written. */
+  /** The metafield that points at it. Where an assignment is written. */
   metafield: RichTextDefinition;
+  owner: MetafieldOwner;
+  /**
+   * Whether the metafield is a list on the product, lining up with its
+   * variants one for one. See this file's header.
+   */
+  positional: boolean;
   /** The family field holding a hex colour, if it has one. */
   hexFieldKey: string | null;
   /** The family's other fields, in definition order. */
   otherFieldKeys: string[];
-  /**
-   * A `color-pattern` metafield, used only as a fallback when the family
-   * carries no link to a standard colour of its own.
-   */
+  /** The `color-pattern` metafield, for the Shopify standard colour columns. */
   colorPattern: { definition: RichTextDefinition; owner: MetafieldOwner } | null;
   /** Every colour family definition in the store, so the page can offer a swap. */
   candidates: { type: string; name: string; entryCount: number }[];
 };
 
-/** Matches `color family`, `colour-family`, `color_family`, `ColorFamily`. */
-const FAMILY_TYPE = /colou?r[-_ ]?family/i;
+/** Matches `color family`, `colour-family`, `color_families`, `ColorFamily`. */
+const FAMILY_TYPE = /colou?r[-_ ]?famil(y|ies)/i;
 
 /** A field whose stored value is a hex colour. */
 const COLOR_FIELD_TYPES = ["color", "list.color"];
@@ -113,8 +128,8 @@ function isColorish(type: string): boolean {
 }
 
 /**
- * Find the colour family definition, the metafield pointing at it, and the
- * route to a standard colour.
+ * Find the family definition, the metafield pointing at it, and the route to a
+ * standard colour.
  *
  * `type` overrides the name match, for a store whose definition is called
  * something this would not guess — the page passes whatever the merchant
@@ -128,22 +143,24 @@ export async function discoverColorFamily(
 > {
   const summaries = await listDefinitions(admin);
   const candidates = summaries
-    .filter((summary) => FAMILY_TYPE.test(summary.type) || FAMILY_TYPE.test(summary.name))
+    .filter(
+      (summary) => FAMILY_TYPE.test(summary.type) || FAMILY_TYPE.test(summary.name),
+    )
     .map(({ type: t, name, entryCount }) => ({ type: t, name, entryCount }));
 
   // An explicit pick is honoured even when its name looks nothing like a
   // colour family; the list is a shortcut, not a restriction.
   const wanted = type
     ? summaries.find((summary) => summary.type === type)
-    : summaries.find((summary) => FAMILY_TYPE.test(summary.type)) ??
-      summaries.find((summary) => FAMILY_TYPE.test(summary.name));
+    : (summaries.find((summary) => FAMILY_TYPE.test(summary.type)) ??
+      summaries.find((summary) => FAMILY_TYPE.test(summary.name)));
 
   if (!wanted) {
     return {
       ok: false,
       message: type
         ? `This store has no metaobject definition of type "${type}".`
-        : "No colour family metaobject definition found. Create one in Settings → Custom data → Metaobjects — or import its definition CSV on the Import & export page — then define a variant metafield that references it.",
+        : "No colour family metaobject definition found. Create one in Settings → Custom data → Metaobjects — or import its definition CSV on the Import & export page — then define a product or variant metafield that references it.",
     };
   }
 
@@ -160,35 +177,12 @@ export async function discoverColorFamily(
     listMetafieldDefinitions(admin, "PRODUCT"),
   ]);
 
-  const pointing = variantDefinitions.filter(
-    (candidate) =>
-      METAOBJECT_TYPES.includes(candidate.type) &&
-      candidate.metaobjectDefinitionId === definition.id,
-  );
-  // A single reference wins over a list one. A variant is in one family, and
-  // the list form would let a sheet hold several with only the first of them
-  // ever shown in a cell — see `familyGid`.
-  const metafield =
-    pointing.find((candidate) => !candidate.type.startsWith("list.")) ??
-    pointing[0];
-  if (!metafield) {
-    return {
-      ok: false,
-      message: `No variant metafield references "${definition.name}" (${definition.type}). Create one in Settings → Custom data → Variants with type "Metaobject reference", restricted to that definition — without it there is nothing on a variant to assign a family to.`,
-    };
-  }
-
-  // The `color-pattern` fallback. Its metaobject definition's *type* lives
-  // behind the metafield's validation id, so the index is what turns the two
-  // into a comparison.
-  const columns = [
+  const owned = [
     ...variantDefinitions.map((candidate) => ({
-      column: candidate.column,
       definition: candidate,
       owner: "PRODUCTVARIANT" as const,
     })),
     ...productDefinitions.map((candidate) => ({
-      column: candidate.column,
       definition: candidate,
       owner: "PRODUCT" as const,
     })),
@@ -196,10 +190,38 @@ export async function discoverColorFamily(
     METAOBJECT_TYPES.includes(candidate.type),
   );
 
-  const index = await buildMetaobjectIndex(admin, columns, { entries: false });
+  // A variant-owned metafield wins when a store has both: it says which family
+  // a variant is in without any positional reasoning, so it is both simpler and
+  // safer to write. The product-owned list is the fallback — and, in the store
+  // this was built against, the only one that exists.
+  const pointing = owned.filter(
+    ({ definition: candidate }) =>
+      candidate.metaobjectDefinitionId === definition.id,
+  );
+  const found =
+    pointing.find(({ owner }) => owner === "PRODUCTVARIANT") ?? pointing[0];
+
+  if (!found) {
+    return {
+      ok: false,
+      message: `No product or variant metafield references "${definition.name}" (${definition.type}). Create one in Settings → Custom data with type "Metaobject reference", restricted to that definition — without it there is nothing to assign a family to.`,
+    };
+  }
+
+  // The Shopify standard colour columns. Its metaobject definition's *type*
+  // lives behind the metafield's validation id, so the index is what turns the
+  // two into a comparison.
+  const index = await buildMetaobjectIndex(
+    admin,
+    owned.map(({ definition: candidate }) => ({
+      column: candidate.column,
+      definition: candidate,
+    })),
+    { entries: false },
+  );
   const pattern =
-    columns.find(({ column, definition: candidate }) => {
-      const referenced = index.typeByColumn.get(column);
+    owned.find(({ definition: candidate }) => {
+      const referenced = index.typeByColumn.get(candidate.column);
       return (
         candidate.metaobjectDefinitionId !== definition.id &&
         referenced != null &&
@@ -216,7 +238,10 @@ export async function discoverColorFamily(
     ok: true,
     setup: {
       definition,
-      metafield,
+      metafield: found.definition,
+      owner: found.owner,
+      positional:
+        found.owner === "PRODUCT" && found.definition.type.startsWith("list."),
       hexFieldKey,
       otherFieldKeys: definition.fieldDefinitions
         .map((field) => field.key)
@@ -234,22 +259,25 @@ export function readDefinitions(setup: ColorFamilySetup): {
   variant: RichTextDefinition[];
   product: RichTextDefinition[];
 } {
-  const variant = [setup.metafield];
+  const variant: RichTextDefinition[] = [];
   const product: RichTextDefinition[] = [];
-
-  if (setup.colorPattern) {
-    if (setup.colorPattern.owner === "PRODUCT") {
-      product.push(setup.colorPattern.definition);
-    } else if (setup.colorPattern.definition.column !== setup.metafield.column) {
-      variant.push(setup.colorPattern.definition);
+  const add = (definition: RichTextDefinition, owner: MetafieldOwner) => {
+    const list = owner === "PRODUCT" ? product : variant;
+    if (!list.some((existing) => existing.column === definition.column)) {
+      list.push(definition);
     }
+  };
+
+  add(setup.metafield, setup.owner);
+  if (setup.colorPattern) {
+    add(setup.colorPattern.definition, setup.colorPattern.owner);
   }
 
   return { variant, product };
 }
 
 // ---------------------------------------------------------------------------
-// Reading a stored value
+// Reading stored values
 // ---------------------------------------------------------------------------
 
 /**
@@ -272,37 +300,93 @@ function gidsIn(raw: string): string[] {
   }
 }
 
-/** The family a variant is in, if any. */
+/** A metafield's stored value for a variant, from whichever owner holds it. */
+function storedValue(
+  variant: VariantMetafields,
+  definition: RichTextDefinition,
+  owner: MetafieldOwner,
+): string {
+  const values = owner === "PRODUCT" ? variant.productValues : variant.values;
+  return values[definition.column] ?? "";
+}
+
+/**
+ * Each variant's 0-based place among its product's variants.
+ *
+ * Built from `position` rather than the order the connection returned, which
+ * is not documented to follow it. Positions are 1-based and may have gaps
+ * after a deletion, so they are ranked rather than used directly.
+ *
+ * Must be computed over **every** variant of a product. Ranking a filtered set
+ * would renumber the survivors and point every lookup at the wrong list entry.
+ */
+export function variantOrdinals(
+  variants: VariantMetafields[],
+): Map<string, number> {
+  const byProduct = new Map<string, VariantMetafields[]>();
+  for (const variant of variants) {
+    const list = byProduct.get(variant.productId);
+    if (list) list.push(variant);
+    else byProduct.set(variant.productId, [variant]);
+  }
+
+  const ordinals = new Map<string, number>();
+  for (const list of byProduct.values()) {
+    [...list]
+      .sort((a, b) => a.position - b.position)
+      .forEach((variant, index) => ordinals.set(variant.id, index));
+  }
+  return ordinals;
+}
+
+/** The gid of the family a variant is in, if any. */
 function familyGid(
   setup: ColorFamilySetup,
   variant: VariantMetafields,
+  ordinals: Map<string, number>,
 ): string | null {
-  return gidsIn(variant.values[setup.metafield.column] ?? "")[0] ?? null;
+  const gids = gidsIn(storedValue(variant, setup.metafield, setup.owner));
+  if (!gids.length) return null;
+  if (!setup.positional) return gids[0];
+  return gids[ordinals.get(variant.id) ?? 0] ?? null;
 }
 
-function patternGids(
+/** The gid of the standard colour on a variant, from the product's list. */
+function patternGid(
   setup: ColorFamilySetup,
   variant: VariantMetafields,
-): string[] {
-  if (!setup.colorPattern) return [];
-  const column = setup.colorPattern.definition.column;
-  const raw =
-    setup.colorPattern.owner === "PRODUCT"
-      ? variant.productValues[column]
-      : variant.values[column];
-  return gidsIn(raw ?? "");
+  ordinals: Map<string, number>,
+): string | null {
+  if (!setup.colorPattern) return null;
+
+  const gids = gidsIn(
+    storedValue(variant, setup.colorPattern.definition, setup.colorPattern.owner),
+  );
+  if (!gids.length) return null;
+
+  // A product-owned list lines up with the variants; anything else is a single
+  // value that belongs to the whole row.
+  if (
+    setup.colorPattern.owner === "PRODUCT" &&
+    setup.colorPattern.definition.type.startsWith("list.")
+  ) {
+    return gids[ordinals.get(variant.id) ?? 0] ?? null;
+  }
+  return gids[0];
 }
 
 /** Every metaobject gid the first resolution pass has to fetch. */
 export function collectColorIds(
   setup: ColorFamilySetup,
   variants: VariantMetafields[],
+  ordinals: Map<string, number>,
 ): string[] {
   const ids = new Set<string>();
   for (const variant of variants) {
-    const family = familyGid(setup, variant);
+    const family = familyGid(setup, variant, ordinals);
     if (family) ids.add(family);
-    for (const gid of patternGids(setup, variant)) ids.add(gid);
+    const pattern = patternGid(setup, variant, ordinals);
+    if (pattern) ids.add(pattern);
   }
   return [...ids];
 }
@@ -332,10 +416,28 @@ export function collectNestedIds(refs: Map<string, MetaobjectRef>): string[] {
 const HEX = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
 /** The first hex-looking value among an entry's fields. */
-function hexOf(ref: MetaobjectRef): string {
+function hexInFields(ref: MetaobjectRef): string {
   for (const value of Object.values(ref.values)) {
     const trimmed = value.trim();
     if (HEX.test(trimmed)) return trimmed;
+  }
+  return "";
+}
+
+/**
+ * The hex a standard colour handle spells out.
+ *
+ * Shopify's colour-pattern handles carry the swatch in the handle itself —
+ * `100-natura-d38f8c-radiant`, `21-8d4f4a-radiant`, `00-ffffff-seventeen`. It
+ * is a fallback, not the first choice: the entry's own field is authoritative
+ * and this is only reached when the entry carries no hex at all, which happens
+ * whenever the second resolution pass came back empty. Six hex digits are
+ * required — three would match far too much of an ordinary handle.
+ */
+export function hexInHandle(handle: string): string {
+  const segments = handle.split("-").filter(Boolean);
+  for (let index = segments.length - 1; index >= 0; index--) {
+    if (/^[0-9a-f]{6}$/i.test(segments[index])) return `#${segments[index]}`;
   }
   return "";
 }
@@ -348,18 +450,17 @@ export type ColorContext = {
 /**
  * The Shopify standard colour behind a variant, and its hex.
  *
- * Tried in order: the family's own reference first, because a family that
- * names its standard colour is saying something specific about *that family*;
- * the variant's or product's `color-pattern` metafield second, which is the
- * store-wide fallback. Whichever is found, the search walks down to whatever
- * entry actually carries a hex — a colour pattern's hex is one level below it.
+ * Whichever reference is followed, the search walks down to whatever entry
+ * actually carries a hex — a colour pattern names the colour but stores the
+ * swatch one level below it — and falls back to the handle when the entries
+ * carry no hex at all.
  */
 function shopifyColorOf(
   starts: string[],
   context: ColorContext,
 ): { name: string; hex: string } {
   const seen = new Set<string>();
-  const queue = [...starts];
+  const queue = starts.filter(Boolean);
   let best: MetaobjectRef | null = null;
 
   while (queue.length) {
@@ -373,7 +474,10 @@ function shopifyColorOf(
     if (isColorish(ref.type)) {
       // A `shopify--color` beats a `shopify--color-pattern`: it is the entry
       // that names one colour, and the one that carries the hex.
-      if (!best || (ref.type === "shopify--color" && best.type !== "shopify--color")) {
+      if (
+        !best ||
+        (ref.type === "shopify--color" && best.type !== "shopify--color")
+      ) {
         best = ref;
       }
     }
@@ -387,17 +491,16 @@ function shopifyColorOf(
 
   if (!best) return { name: "", hex: "" };
 
-  // The hex may sit on the entry itself or on what it points at — a pattern
-  // entry names the colour but stores the swatch one level down.
-  let hex = hexOf(best);
+  let hex = hexInFields(best);
   if (!hex) {
     for (const gid of seen) {
       const ref = context.metaobjects.get(gid);
       if (!ref || !isColorish(ref.type)) continue;
-      hex = hexOf(ref);
+      hex = hexInFields(ref);
       if (hex) break;
     }
   }
+  if (!hex) hex = hexInHandle(best.handle);
 
   return { name: best.displayName?.trim() || best.handle, hex };
 }
@@ -429,6 +532,7 @@ function renderFieldValue(value: string, context: ColorContext): string {
 export function colorFamilyColumns(setup: ColorFamilySetup): string[] {
   return [
     ...IDENTITY_COLUMNS,
+    POSITION_COLUMN,
     FAMILY_COLUMN,
     FAMILY_HANDLE_COLUMN,
     ...(setup.hexFieldKey ? [FAMILY_HEX_COLUMN] : []),
@@ -456,12 +560,13 @@ function identityCells(variant: VariantMetafields): string[] {
 export function colorFamilyCsv(
   setup: ColorFamilySetup,
   variants: VariantMetafields[],
+  ordinals: Map<string, number>,
   context: ColorContext,
 ): string {
   const header = colorFamilyColumns(setup);
 
   const rows = variants.map((variant) => {
-    const gid = familyGid(setup, variant);
+    const gid = familyGid(setup, variant, ordinals);
     const family = gid ? context.metaobjects.get(gid) : undefined;
     const name =
       family &&
@@ -469,13 +574,12 @@ export function colorFamilyCsv(
         ? family.displayName.trim()
         : family.handle);
 
-    const color = shopifyColorOf(
-      [...(gid ? [gid] : []), ...patternGids(setup, variant)],
-      context,
-    );
+    const pattern = patternGid(setup, variant, ordinals);
+    const color = shopifyColorOf([...(pattern ? [pattern] : []), ...(gid ? [gid] : [])], context);
 
     return [
       ...identityCells(variant),
+      String((ordinals.get(variant.id) ?? 0) + 1),
       name ?? "",
       family?.handle ?? "",
       ...(setup.hexFieldKey
@@ -496,12 +600,15 @@ export function colorFamilyTemplateCsv(setup: ColorFamilySetup): string {
   return toCsv([colorFamilyColumns(setup)]);
 }
 
-/** Keep only variants that are in a family. */
+/** Keep only variants that are in a family. Ordinals must already be computed. */
 export function assignedOnly(
   setup: ColorFamilySetup,
   variants: VariantMetafields[],
+  ordinals: Map<string, number>,
 ): VariantMetafields[] {
-  return variants.filter((variant) => familyGid(setup, variant) != null);
+  return variants.filter(
+    (variant) => familyGid(setup, variant, ordinals) != null,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -582,20 +689,6 @@ export type FamilyEntry = {
   values: Record<string, string>;
 };
 
-export type ColorFamilyPlanContext = {
-  index: MetaobjectIndex;
-  /** The store's entries as they are now, by handle, for the field diff. */
-  entries: Map<string, FamilyEntry>;
-  /**
-   * Whether a blank `color family` cell removes the variant from its family.
-   *
-   * Off — the rule the rest of this app is built on — so a half-filled
-   * spreadsheet cannot unassign a catalogue. On, every clear still shows in the
-   * review step as a real `Peach Tones → —` diff first.
-   */
-  clearEmpty: boolean;
-};
-
 /**
  * Read every family entry once, for both the name lookup and the field diff.
  *
@@ -639,6 +732,29 @@ export async function loadFamilyEntries(
   return { index, entries };
 }
 
+export type ColorFamilyPlanContext = {
+  index: MetaobjectIndex;
+  /** The store's entries as they are now, by handle, for the field diff. */
+  entries: Map<string, FamilyEntry>;
+  /**
+   * Whether a blank `color family` cell removes the variant from its family.
+   *
+   * Off — the rule the rest of this app is built on — so a half-filled
+   * spreadsheet cannot unassign a catalogue. On, every clear still shows in the
+   * review step as a real `Peach Tones → —` diff first. With a positional list
+   * a *partial* clear is refused outright: see `planProductLists`.
+   */
+  clearEmpty: boolean;
+};
+
+/**
+ * What one row wants its variant's family to be.
+ *
+ * `undefined` means the row said nothing — no column, or a blank cell with
+ * clearing off — and the stored value stands. `null` means "no family".
+ */
+type Wanted = { handle: string } | null | undefined;
+
 export function planColorFamilyImport(
   setup: ColorFamilySetup,
   records: Record<string, string>[],
@@ -646,24 +762,32 @@ export function planColorFamilyImport(
   context: ColorFamilyPlanContext,
 ): ColorFamilyPlan {
   const type = setup.definition.type;
+  const ordinals = variantOrdinals(variants);
+
   const fieldColumns = new Map<string, string>();
   if (setup.hexFieldKey) fieldColumns.set(FAMILY_HEX_COLUMN, setup.hexFieldKey);
   for (const key of setup.otherFieldKeys) {
     fieldColumns.set(familyFieldColumn(key), key);
   }
 
-  // Inverted once, not per row: every row renders the family it is moving
-  // *away* from, and rebuilding this inside that loop would walk the whole
-  // entry index once per row.
+  // Inverted once, not per row: every row renders the family it is moving away
+  // from, and rebuilding this inside that loop would walk the whole entry index
+  // once per row.
   const handleById = new Map<string, string>();
   for (const [key, id] of context.index.idByHandle) {
-    if (key.startsWith(`${type}:`)) handleById.set(id, key.slice(type.length + 1));
+    if (key.startsWith(`${type}:`)) {
+      handleById.set(id, key.slice(type.length + 1));
+    }
   }
 
   const bySku = new Map<string, VariantMetafields[]>();
   const byTitle = new Map<string, VariantMetafields[]>();
   const byOptions = new Map<string, VariantMetafields[]>();
-  const push = <K,>(map: Map<K, VariantMetafields[]>, key: K, variant: VariantMetafields) => {
+  const push = <K,>(
+    map: Map<K, VariantMetafields[]>,
+    key: K,
+    variant: VariantMetafields,
+  ) => {
     const list = map.get(key);
     if (list) list.push(variant);
     else map.set(key, [variant]);
@@ -696,10 +820,15 @@ export function planColorFamilyImport(
   );
 
   const rows: ColorFamilyRowPlan[] = [];
+  /** variantId → what its row wants, for the product list rebuild. */
+  const wantedByVariant = new Map<string, { wanted: Wanted; rowNumber: number }>();
   // family handle → column → value → the rows asking for it.
   const familyCells = new Map<
     string,
-    Map<string, Map<string, { value: string; change: string; rowNumbers: number[] }>>
+    Map<
+      string,
+      Map<string, { value: string; change: string; rowNumbers: number[] }>
+    >
   >();
 
   records.forEach((record, position) => {
@@ -729,7 +858,9 @@ export function planColorFamilyImport(
       matches = bySku.get(sku);
       how = `the SKU "${sku}"`;
     } else if (handle && variantTitle) {
-      matches = byTitle.get(`${handle.toLowerCase()}#${variantTitle.toLowerCase()}`);
+      matches = byTitle.get(
+        `${handle.toLowerCase()}#${variantTitle.toLowerCase()}`,
+      );
       how = `"${handle}" / "${variantTitle}"`;
     } else if (handle) {
       matches = byOptions.get(`${handle.toLowerCase()}#${rowOptionKey(record)}`);
@@ -770,32 +901,35 @@ export function planColorFamilyImport(
       const resolved = resolveFamilyHandle(cell, type, context.index);
       if (resolved.ok) target = resolved.handle;
       else errors.push(`${FAMILY_COLUMN}: ${resolved.message}`);
-    } else if (fallbackHandle && context.index.idByHandle.has(`${type}:${fallbackHandle}`)) {
+    } else if (
+      fallbackHandle &&
+      context.index.idByHandle.has(`${type}:${fallbackHandle}`)
+    ) {
       target = fallbackHandle;
     }
 
-    // --- The assignment ----------------------------------------------------
-    const storedGid = familyGid(setup, variant);
-    const storedHandle = storedGid ? handleById.get(storedGid) ?? "" : "";
+    // --- What the row wants for this variant -------------------------------
+    const storedGid = familyGid(setup, variant, ordinals);
+    const storedHandle = storedGid ? (handleById.get(storedGid) ?? "") : "";
 
+    let wanted: Wanted;
     let assign: ColorFamilyRowPlan["assign"];
-    if (FAMILY_COLUMN in record) {
-      if (cell && target && target !== storedHandle) {
-        const value = toMetafieldValue(
-          setup.metafield.type,
-          target,
-          context.index.idByHandle,
-          type,
-        );
-        if (value.ok) {
-          assign = { kind: "write", value: value.value, handle: target };
+    if (FAMILY_COLUMN in record && !errors.length) {
+      if (cell && target) {
+        wanted = { handle: target };
+        if (target !== storedHandle) {
+          const gid = context.index.idByHandle.get(`${type}:${target}`)!;
+          assign = { kind: "write", handle: target, value: gid };
           changes.push(`${FAMILY_COLUMN}: ${storedHandle || "—"} → ${target}`);
-        } else {
-          errors.push(`${FAMILY_COLUMN}: ${value.message}`);
         }
-      } else if (!cell && context.clearEmpty && storedGid) {
-        assign = { kind: "clear" };
-        changes.push(`${FAMILY_COLUMN}: ${storedHandle || "—"} → —`);
+      } else if (!cell) {
+        if (context.clearEmpty) {
+          wanted = null;
+          if (storedGid) {
+            assign = { kind: "clear" };
+            changes.push(`${FAMILY_COLUMN}: ${storedHandle || "—"} → —`);
+          }
+        }
       }
     }
 
@@ -808,27 +942,32 @@ export function planColorFamilyImport(
       for (const [column, key] of fieldColumns) {
         if (!(column in record)) continue;
 
-        const wanted = (record[column] ?? "").trim();
+        const value = (record[column] ?? "").trim();
         const stored = (entry?.values[key] ?? "").trim();
         // A blank field cell is always "leave it alone". `clearEmpty` is about
         // the variant's assignment; blanking a shared entry's field from a
         // variant row is not something a spreadsheet should be able to do by
         // omission.
-        if (!wanted || wanted === stored) continue;
+        if (!value || value === stored) continue;
 
         const columns =
           familyCells.get(target) ??
-          new Map<string, Map<string, { value: string; change: string; rowNumbers: number[] }>>();
+          new Map<
+            string,
+            Map<string, { value: string; change: string; rowNumbers: number[] }>
+          >();
         familyCells.set(target, columns);
-        const slots = columns.get(column) ?? new Map<string, { value: string; change: string; rowNumbers: number[] }>();
+        const slots =
+          columns.get(column) ??
+          new Map<string, { value: string; change: string; rowNumbers: number[] }>();
         columns.set(column, slots);
 
-        const slot = slots.get(wanted);
+        const slot = slots.get(value);
         if (slot) slot.rowNumbers.push(rowNumber);
         else {
-          slots.set(wanted, {
-            value: wanted,
-            change: `${column}: ${shorten(stored) || "—"} → ${shorten(wanted)}`,
+          slots.set(value, {
+            value,
+            change: `${column}: ${shorten(stored) || "—"} → ${shorten(value)}`,
             rowNumbers: [rowNumber],
           });
         }
@@ -840,20 +979,33 @@ export function planColorFamilyImport(
       return;
     }
 
+    wantedByVariant.set(variant.id, { wanted, rowNumber });
     rows.push({
       rowNumber,
       label,
       sku,
       variantId: variant.id,
+      productId: variant.productId,
       action: assign ? "update" : "unchanged",
       changes,
       ...(assign ? { assign } : {}),
     });
   });
 
+  // --- Fold the assignments into product writes -----------------------------
+  const { products, errors: productErrors } =
+    setup.owner === "PRODUCT"
+      ? planProductLists(setup, variants, ordinals, wantedByVariant, context, handleById)
+      : { products: [] as ProductFamilyChange[], errors: new Map<number, string[]>() };
+
   // --- Reconcile the family entry edits -------------------------------------
   const families: FamilyEntryChange[] = [];
-  const conflicted = new Map<number, string[]>();
+  const conflicted = new Map<number, string[]>(productErrors);
+  const addError = (rowNumber: number, message: string) => {
+    const list = conflicted.get(rowNumber) ?? [];
+    list.push(message);
+    conflicted.set(rowNumber, list);
+  };
 
   for (const [handle, columns] of familyCells) {
     const change: FamilyEntryChange = {
@@ -876,11 +1028,7 @@ export function planColorFamilyImport(
           .join("; ")}. A family holds one value for every variant in it.`;
 
         for (const slot of wanted) {
-          for (const rowNumber of slot.rowNumbers) {
-            const list = conflicted.get(rowNumber) ?? [];
-            list.push(message);
-            conflicted.set(rowNumber, list);
-          }
+          for (const rowNumber of slot.rowNumbers) addError(rowNumber, message);
         }
         continue;
       }
@@ -913,12 +1061,21 @@ export function planColorFamilyImport(
   const liveFamilies = families.filter((change) =>
     change.rowNumbers.some((rowNumber) => liveRows.has(rowNumber)),
   );
+  // A product list built partly from rows that turned out to be errors would
+  // write values the merchant was never shown as valid.
+  const liveProducts = products.filter((change) =>
+    change.rowNumbers.every((rowNumber) => liveRows.has(rowNumber)),
+  );
 
-  const familyRows = new Set(liveFamilies.flatMap((change) => change.rowNumbers));
+  const touched = new Set([
+    ...liveFamilies.flatMap((change) => change.rowNumbers),
+    ...liveProducts.flatMap((change) => change.rowNumbers),
+  ]);
   const counts = { update: 0, unchanged: 0, error: 0 };
   for (const row of rows) {
-    // A row whose only change is to the family entry still changed something.
-    if (row.action === "unchanged" && familyRows.has(row.rowNumber)) {
+    // A row whose only change is to the family entry, or to its product's
+    // list, still changed something.
+    if (row.action === "unchanged" && touched.has(row.rowNumber)) {
       row.action = "update";
     }
     counts[row.action]++;
@@ -927,7 +1084,10 @@ export function planColorFamilyImport(
   return {
     type,
     column: setup.metafield.column,
+    owner: setup.owner === "PRODUCT" ? "product" : "variant",
+    positional: setup.positional,
     rows,
+    products: liveProducts,
     families: liveFamilies,
     counts,
     unknownColumns,
@@ -939,4 +1099,153 @@ export function planColorFamilyImport(
       0,
     ),
   };
+}
+
+/**
+ * Rebuild each product's colour-family metafield from its variants' rows.
+ *
+ * A positional list cannot have holes: entry N *is* variant N, so a list
+ * missing one variant's family silently shifts every later variant onto the
+ * wrong colour. Every variant of the product therefore has to end up with a
+ * family — from its row, or from the value already stored at its place — and a
+ * product where some would and some would not is refused outright rather than
+ * written in a shape that cannot be read back.
+ *
+ * Clearing is all-or-nothing for the same reason: emptying the whole list
+ * deletes the metafield, emptying part of it is the gap this refuses.
+ */
+function planProductLists(
+  setup: ColorFamilySetup,
+  variants: VariantMetafields[],
+  ordinals: Map<string, number>,
+  wantedByVariant: Map<string, { wanted: Wanted; rowNumber: number }>,
+  context: ColorFamilyPlanContext,
+  handleById: Map<string, string>,
+): { products: ProductFamilyChange[]; errors: Map<number, string[]> } {
+  const type = setup.definition.type;
+  const products: ProductFamilyChange[] = [];
+  const errors = new Map<number, string[]>();
+
+  const byProduct = new Map<string, VariantMetafields[]>();
+  for (const variant of variants) {
+    const list = byProduct.get(variant.productId);
+    if (list) list.push(variant);
+    else byProduct.set(variant.productId, [variant]);
+  }
+
+  for (const [productId, list] of byProduct) {
+    const ordered = [...list].sort((a, b) => a.position - b.position);
+    const rowNumbers = ordered
+      .map((variant) => wantedByVariant.get(variant.id)?.rowNumber)
+      .filter((rowNumber): rowNumber is number => rowNumber != null);
+    if (!rowNumbers.length) continue;
+
+    const stored = gidsIn(
+      storedValue(ordered[0], setup.metafield, setup.owner),
+    );
+    const label = ordered[0].productHandle;
+
+    // A non-positional product metafield is one value for the whole product.
+    // Rows that disagree are an error on all of them — the same rule the
+    // variant metafields page applies to `product.` columns.
+    if (!setup.positional) {
+      const asked = new Map<string, number[]>();
+      for (const variant of ordered) {
+        const entry = wantedByVariant.get(variant.id);
+        if (!entry || entry.wanted === undefined) continue;
+        const key = entry.wanted === null ? "" : entry.wanted.handle;
+        const rows = asked.get(key) ?? [];
+        rows.push(entry.rowNumber);
+        asked.set(key, rows);
+      }
+      if (asked.size === 0) continue;
+      if (asked.size > 1) {
+        const message = `Rows disagree about "${FAMILY_COLUMN}" for ${label}: ${[...asked]
+          .map(([handle, rows]) => `row(s) ${rows.join(", ")} → ${handle || "—"}`)
+          .join("; ")}. This metafield holds one family for the whole product.`;
+        for (const rows of asked.values()) {
+          for (const rowNumber of rows) {
+            errors.set(rowNumber, [...(errors.get(rowNumber) ?? []), message]);
+          }
+        }
+        continue;
+      }
+
+      const [[handle, rows]] = [...asked];
+      const storedHandle = stored[0] ? (handleById.get(stored[0]) ?? "") : "";
+      if (handle === storedHandle) continue;
+
+      products.push({
+        productId,
+        label,
+        rowNumbers: rows,
+        value: handle
+          ? valueFor(setup, [context.index.idByHandle.get(`${type}:${handle}`)!])
+          : null,
+        changes: [`${FAMILY_COLUMN}: ${storedHandle || "—"} → ${handle || "—"}`],
+      });
+      continue;
+    }
+
+    // --- Positional ---------------------------------------------------------
+    const desired: (string | null)[] = [];
+    const changes: string[] = [];
+    let changed = false;
+
+    ordered.forEach((variant, index) => {
+      const at = ordinals.get(variant.id) ?? index;
+      // A list shorter than the variant count leaves the tail unset, so this
+      // genuinely can be absent however `stored` is typed.
+      const current: string | null = stored[at] ?? null;
+      const entry = wantedByVariant.get(variant.id);
+
+      let next: string | null = current;
+      if (entry && entry.wanted !== undefined) {
+        next = entry.wanted
+          ? (context.index.idByHandle.get(`${type}:${entry.wanted.handle}`) ?? null)
+          : null;
+      }
+
+      if (next !== current) {
+        changed = true;
+        changes.push(
+          `${variant.title}: ${(current && handleById.get(current)) || "—"} → ${
+            (next && handleById.get(next)) || "—"
+          }`,
+        );
+      }
+      desired[at] = next;
+    });
+
+    if (!changed) continue;
+
+    const filled = desired.filter((gid) => gid != null);
+    if (filled.length > 0 && filled.length < ordered.length) {
+      const missing = ordered
+        .filter((variant) => desired[ordinals.get(variant.id) ?? 0] == null)
+        .map((variant) => variant.title);
+      const message = `"${setup.metafield.column}" on ${label} is a positional list — entry N belongs to variant N — so every one of its ${ordered.length} variants needs a family. ${missing.length} would have none (${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ", …" : ""}). Fill them in, or clear the whole product.`;
+      for (const rowNumber of rowNumbers) {
+        errors.set(rowNumber, [...(errors.get(rowNumber) ?? []), message]);
+      }
+      continue;
+    }
+
+    products.push({
+      productId,
+      label,
+      rowNumbers,
+      value: filled.length ? valueFor(setup, filled as string[]) : null,
+      changes,
+    });
+  }
+
+  return { products, errors };
+}
+
+/** The stored shape for a set of gids: a JSON array, or a bare gid. */
+function valueFor(setup: ColorFamilySetup, gids: string[]): string {
+  return setup.metafield.type.startsWith("list.")
+    ? JSON.stringify(gids)
+    : gids[0];
 }

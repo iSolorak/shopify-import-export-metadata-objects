@@ -13,6 +13,7 @@ import {
   colorFamilyTemplateCsv,
   discoverColorFamily,
   readDefinitions,
+  variantOrdinals,
 } from "../lib/color-family.server";
 import { colorFamilyExportFilename, type RefStyle } from "../lib/color-family";
 
@@ -57,14 +58,19 @@ const exportCsv = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const all = await getAllVariantMetafields(admin, readDefinitions(setup));
-  const variants = onlyAssigned ? assignedOnly(setup, all) : all;
+
+  // Computed over every variant, before any filtering. A product's list lines
+  // up with *all* its variants, so ranking a filtered set would renumber the
+  // survivors and read the wrong entry for each one.
+  const ordinals = variantOrdinals(all);
+  const variants = onlyAssigned ? assignedOnly(setup, all, ordinals) : all;
 
   // Resolved from the gids actually present rather than by reading every entry
   // of the definition: a store with six families and ten thousand variants
   // should fetch six entries, not ten thousand.
   const metaobjects = await resolveMetaobjectIds(
     admin,
-    collectColorIds(setup, variants),
+    collectColorIds(setup, variants, ordinals),
   );
 
   // Second pass. A colour pattern names the colour but stores the swatch one
@@ -77,7 +83,7 @@ const exportCsv = async ({ request }: LoaderFunctionArgs) => {
   }
 
   return csvResponse(
-    colorFamilyCsv(setup, variants, { metaobjects, refs }),
+    colorFamilyCsv(setup, variants, ordinals, { metaobjects, refs }),
     kind,
   );
 };

@@ -13,13 +13,14 @@ import { IDENTITY_COLUMNS } from "./variant-metafield-columns";
 export { IDENTITY_COLUMNS };
 
 /**
- * The family assigned to the variant, written the way a person reads it —
+ * The family this variant is in, written the way a person reads it —
  * `Peach Tones`, not a gid.
  *
- * The one writable reference column: what lands here is set on the variant's
- * colour-family metafield. A handle is accepted too, and wins over a display
- * name when both could match, so a round trip of a handle-style export writes
- * back exactly what it read.
+ * The one writable reference column. Where it lands depends on how the store
+ * models families: on the variant's own metafield, or at this variant's place
+ * in its product's list. A handle is accepted too, and wins over a display name
+ * when both could match, so a round trip of a handle-style export writes back
+ * exactly what it read.
  */
 export const FAMILY_COLUMN = "color family";
 
@@ -32,6 +33,17 @@ export const FAMILY_COLUMN = "color family";
  * `FAMILY_HEX_COLUMN`.
  */
 export const FAMILY_HANDLE_COLUMN = "color family handle";
+
+/**
+ * The variant's place in its product, 1-based.
+ *
+ * Read-only, and informational only: the importer takes a variant's position
+ * from the store after matching the row by SKU, never from this cell or from
+ * where the row sits in the file. Sorting or filtering the spreadsheet is
+ * therefore safe. It is exported because with a positional list this is the
+ * number that explains *why* a given colour is on a given row.
+ */
+export const POSITION_COLUMN = "variant position";
 
 /**
  * The family's own colour value, as hex.
@@ -60,14 +72,12 @@ export function familyFieldKeyOf(column: string): string | null {
 }
 
 /**
- * The Shopify standard colour behind the family, and its hex.
+ * The Shopify standard colour on this variant, and its hex.
  *
- * Both read-only. They are resolved by following the family entry's own
- * reference into `shopify--color` / `shopify--color-pattern`, falling back to
- * the variant's or product's `color-pattern` metafield when the family carries
- * no such link. Writing either would mean editing a standard definition's
- * entry, which is a different operation with a much wider blast radius than
- * anything this page offers.
+ * Both read-only. They come from the product's `shopify.color-pattern` list at
+ * this variant's position, falling back to a link the family carries itself.
+ * Writing either would mean editing a standard definition's entries, which is
+ * a far wider change than anything this page offers.
  */
 export const SHOPIFY_COLOR_COLUMN = "shopify color";
 export const SHOPIFY_COLOR_HEX_COLUMN = "shopify color hex";
@@ -75,6 +85,7 @@ export const SHOPIFY_COLOR_HEX_COLUMN = "shopify color hex";
 /** Columns read for context and never written back. */
 export const READ_ONLY_COLUMNS: string[] = [
   FAMILY_HANDLE_COLUMN,
+  POSITION_COLUMN,
   SHOPIFY_COLOR_COLUMN,
   SHOPIFY_COLOR_HEX_COLUMN,
 ];
@@ -91,9 +102,16 @@ export function colorFamilyExportFilename(kind: "values" | "template") {
 // The plan, as the review table reads it
 // ---------------------------------------------------------------------------
 
-/** What a row would do to its variant's colour-family metafield. */
+/**
+ * What a row wants done about its variant's family.
+ *
+ * Always the row's *intent*, for the review table. Whether it becomes a write
+ * of its own depends on where the metafield lives: a variant-owned one is
+ * written straight from here, a product-owned one is folded into a
+ * `ProductFamilyChange` first.
+ */
 export type FamilyAssignment =
-  | { kind: "write"; value: string; handle: string }
+  | { kind: "write"; handle: string; value: string }
   | { kind: "clear" };
 
 export type ColorFamilyRowPlan = {
@@ -103,11 +121,32 @@ export type ColorFamilyRowPlan = {
   sku: string;
   /** Resolved once the row matched exactly one variant. */
   variantId?: string;
+  productId?: string;
   action: "update" | "unchanged" | "error";
   /** `column: old → new`, one per change. */
   changes: string[];
   message?: string;
   assign?: FamilyAssignment;
+};
+
+/**
+ * One product's colour-family metafield, rebuilt from the rows that named its
+ * variants.
+ *
+ * Only used when the metafield lives on the **product**. In this store's model
+ * it is a list whose Nth entry belongs to the Nth variant, so a single variant
+ * changing family means rewriting the whole list — which in turn means every
+ * variant of that product has to be accounted for, including the ones the file
+ * never mentions. `value` is the finished list; `null` deletes the metafield.
+ */
+export type ProductFamilyChange = {
+  productId: string;
+  /** The product's handle, for the review table. */
+  label: string;
+  /** Rows that contributed, for the message when they disagree. */
+  rowNumbers: number[];
+  value: string | null;
+  changes: string[];
 };
 
 /**
@@ -132,9 +171,13 @@ export type FamilyEntryChange = {
 export type ColorFamilyPlan = {
   /** The metaobject type being edited, e.g. `color_family`. */
   type: string;
-  /** The variant metafield being assigned, as `namespace.key`. */
+  /** The metafield being assigned, as `namespace.key`. */
   column: string;
+  owner: "product" | "variant";
+  /** Whether the product's list lines up with its variants, one each. */
+  positional: boolean;
   rows: ColorFamilyRowPlan[];
+  products: ProductFamilyChange[];
   families: FamilyEntryChange[];
   counts: { update: number; unchanged: number; error: number };
   /** Columns in the file matching nothing this page knows about. */

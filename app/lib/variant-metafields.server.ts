@@ -77,6 +77,17 @@ export type VariantMetafields = {
   sku: string | null;
   /** Variant title, e.g. `Peach / S`. */
   title: string;
+  /**
+   * The variant's 1-based place in its product.
+   *
+   * Carried because a product metafield holding a *list* — Shopify's own
+   * `shopify.color-pattern` is one — lines its entries up with the variants in
+   * this order, and nothing else in a variant row says which entry is whose.
+   * The connection's own order is not a substitute: it is not documented to
+   * follow position, and a mis-ordered list would silently attach the wrong
+   * colour to every variant of a product.
+   */
+  position: number;
   selectedOptions: { name: string; value: string }[];
   productId: string;
   productHandle: string;
@@ -151,6 +162,7 @@ type VariantNode = {
   id: string;
   title: string;
   sku: string | null;
+  position: number;
   selectedOptions: { name: string; value: string }[];
 } & Record<string, unknown>;
 
@@ -182,6 +194,7 @@ function toVariantMetafields(
     id: node.id,
     sku: node.sku,
     title: node.title,
+    position: node.position,
     selectedOptions: node.selectedOptions,
     productId: product.id,
     productHandle: product.handle,
@@ -258,6 +271,7 @@ async function readVariantConnection(
           id
           title
           sku
+          position
           selectedOptions { name value }
           product { id handle title }
           ${metafieldSelections(definitions.variant, "mf")}

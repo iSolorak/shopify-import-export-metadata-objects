@@ -85,10 +85,13 @@ type ActionData =
   | { step: "plan"; plan: ColorFamilyPlan; clearEmpty: boolean }
   | {
       step: "applied";
+      /** Variants whose family changed, however few writes that took. */
       variants: number;
+      /** Metafield writes that landed — one per product when product-owned. */
       assigned: number;
       cleared: number;
       families: number;
+      owner: "product" | "variant";
       failures: string[];
     }
   | { step: "error"; message: string };
@@ -104,8 +107,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   if (!found.ok) return { ok: false as const, message: found.message };
 
-  const { definition, metafield, hexFieldKey, otherFieldKeys, colorPattern, candidates } =
-    found.setup;
+  const {
+    definition,
+    metafield,
+    owner,
+    positional,
+    hexFieldKey,
+    otherFieldKeys,
+    colorPattern,
+    candidates,
+  } = found.setup;
 
   // Only what the page renders. The full `Definition` carries validations and
   // descriptions no part of this UI reads.
@@ -115,7 +126,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     name: definition.name,
     column: metafield.column,
     metafieldName: metafield.name,
-    metafieldType: metafield.type,
+    owner: owner === "PRODUCT" ? ("product" as const) : ("variant" as const),
+    positional,
     pinned: metafield.pinned,
     hexFieldKey,
     otherFieldKeys,
@@ -186,10 +198,33 @@ async function buildPlan(
 
   const variants: VariantMetafields[] = [];
   const seen = new Set<string>();
-  for (const variant of [...bySku, ...byHandle]) {
-    if (seen.has(variant.id)) continue;
-    seen.add(variant.id);
-    variants.push(variant);
+  const add = (found: VariantMetafields[]) => {
+    for (const variant of found) {
+      if (seen.has(variant.id)) continue;
+      seen.add(variant.id);
+      variants.push(variant);
+    }
+  };
+  add(bySku);
+  add(byHandle);
+
+  // A product-owned metafield is written for the product as a whole, so the
+  // planner has to see **every** variant of every product the file touches —
+  // including the ones it never mentions. With a positional list that is not a
+  // nicety: rebuilding a list from a partial set would drop the unmentioned
+  // variants' families and shift every later variant onto the wrong colour.
+  //
+  // The SKU lookup returns single variants, so which products are involved is
+  // only known after it. This second pass fills in their siblings; a
+  // variant-owned metafield needs none of it and pays nothing.
+  if (setup.owner === "PRODUCT") {
+    const wanted = [
+      ...new Set(variants.map((variant) => variant.productHandle)),
+    ].filter((handle) => !handles.includes(handle));
+
+    if (wanted.length) {
+      add(await getVariantMetafieldsByProductHandles(admin, reads, wanted));
+    }
   }
 
   return {
@@ -246,6 +281,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (!row.variantId || !row.assign) continue;
       variants++;
 
+      // A product-owned metafield is never written from a row: the planner has
+      // folded these intents into one value per product, which is the only
+      // shape a positional list can be written in. `row.assign` stays as the
+      // row's intent for the review table.
+      if (result.plan.owner === "product") continue;
+
       if (row.assign.kind === "write") {
         writes.push({
           write: {
@@ -261,6 +302,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         removals.push({
           remove: { ownerId: row.variantId, namespace, key },
           label: `Row ${row.rowNumber} (${row.label})`,
+        });
+      }
+    }
+
+    // One write per product, however many of its variants the file listed.
+    for (const change of result.plan.products) {
+      if (change.value == null) {
+        removals.push({
+          remove: { ownerId: change.productId, namespace, key },
+          label: `Product ${change.label}`,
+        });
+      } else {
+        writes.push({
+          write: {
+            ownerId: change.productId,
+            namespace,
+            key,
+            type: metafieldType,
+            value: change.value,
+          },
+          label: `Product ${change.label}`,
         });
       }
     }
@@ -322,6 +384,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     return {
       step: "applied",
+      owner: result.plan.owner,
       variants,
       assigned,
       cleared,
@@ -400,10 +463,10 @@ export default function ColorFamilyPage() {
             </s-banner>
             <s-paragraph>
               This page needs two things: a metaobject definition holding your
-              colour families, and a variant metafield restricted to it. With
-              both in place it exports one row per variant — its family, that
-              family&rsquo;s own fields, and the Shopify standard colour and hex
-              behind it — and imports the same file back.
+              colour families, and a product or variant metafield restricted to
+              it. With both in place it exports one row per variant — its
+              family, that family&rsquo;s own fields, and the Shopify standard
+              colour and hex behind it — and imports the same file back.
             </s-paragraph>
           </s-stack>
         </s-section>
@@ -422,8 +485,8 @@ export default function ColorFamilyPage() {
         <s-stack direction="block" gap="base">
           <s-paragraph>
             Families live in <s-text>{setup.type}</s-text> ({setup.name}), and{" "}
-            <s-text>{setup.column}</s-text> ({setup.metafieldName}) is the
-            variant metafield that points at them.
+            <s-text>{setup.column}</s-text> ({setup.metafieldName}) is the{" "}
+            {setup.owner} metafield that points at them.
             {setup.hexFieldKey ? (
               <>
                 {" "}
@@ -435,13 +498,33 @@ export default function ColorFamilyPage() {
             )}
           </s-paragraph>
 
-          {setup.metafieldType.startsWith("list.") && (
+          {setup.positional && (
+            <s-banner tone="info">
+              <s-paragraph>
+                <s-text>{setup.column}</s-text> is a <strong>list on the
+                product</strong>, so entry N belongs to variant N — the same
+                shape <s-text>shopify.color-pattern</s-text> uses. A row is
+                placed by its variant&rsquo;s position as the store reports it,
+                never by where the row sits in the file, so sorting or
+                filtering the spreadsheet is safe.
+              </s-paragraph>
+              <s-paragraph>
+                Because a list cannot have holes, changing one variant rewrites
+                its product&rsquo;s whole list, and every variant of that
+                product has to end up with a family. A product where some would
+                and some would not is reported as an error rather than written
+                in a shape that cannot be read back.
+              </s-paragraph>
+            </s-banner>
+          )}
+
+          {setup.owner === "product" && !setup.positional && (
             <s-banner tone="warning">
               <s-paragraph>
-                <s-text>{setup.column}</s-text> is a <strong>list</strong> of
-                references, so a variant could be in several families at once.
-                This page works with one: it exports the first and an import
-                replaces the whole list with the family the row names.
+                <s-text>{setup.column}</s-text> is a single reference on the{" "}
+                <strong>product</strong>, so it holds one family for all of its
+                variants. Rows of the same product asking for different
+                families are an error on all of them.
               </s-paragraph>
             </s-banner>
           )}
@@ -450,27 +533,32 @@ export default function ColorFamilyPage() {
             <s-banner tone="warning">
               <s-paragraph>
                 <s-text>{setup.column}</s-text> is not pinned, so it accepts
-                values but never appears on the variant in the admin — which
-                looks exactly like an import that did nothing. Pin it in
-                Settings → Custom data → Variants.
+                values but never appears on the {setup.owner} in the admin —
+                which looks exactly like an import that did nothing. Pin it in
+                Settings → Custom data.
               </s-paragraph>
             </s-banner>
           )}
 
           <s-paragraph>
             <strong>{SHOPIFY_COLOR_COLUMN}</strong> and{" "}
-            <strong>{SHOPIFY_COLOR_HEX_COLUMN}</strong> are resolved by
-            following the family&rsquo;s own reference into Shopify&rsquo;s
-            standard colour definitions
+            <strong>{SHOPIFY_COLOR_HEX_COLUMN}</strong> come from{" "}
             {setup.colorPattern ? (
               <>
-                , falling back to <s-text>{setup.colorPattern.column}</s-text> on
-                the {setup.colorPattern.owner} when a family carries no such link
+                <s-text>{setup.colorPattern.column}</s-text> on the{" "}
+                {setup.colorPattern.owner}, at this variant&rsquo;s position,
+                falling back to a link the family carries itself
               </>
             ) : (
-              <> (this store has no colour-pattern metafield to fall back on)</>
+              <>
+                a link the family carries itself (this store has no
+                colour-pattern metafield)
+              </>
             )}
-            . Both are read-only: a family&rsquo;s own{" "}
+            . The hex is read from the standard colour entry, or from its handle
+            when the entry carries none &mdash;{" "}
+            <s-text>100-natura-d38f8c-radiant</s-text> spells out{" "}
+            <s-text>#d38f8c</s-text>. Both are read-only: a family&rsquo;s own{" "}
             {setup.hexFieldKey ? FAMILY_HEX_COLUMN : "fields"} is what this page
             writes, because editing a standard definition&rsquo;s entries is a
             far wider change than anything offered here.
@@ -572,6 +660,18 @@ export default function ColorFamilyPage() {
               <strong>{FAMILY_COLUMN}</strong> assigns one variant to a family,
               by display name or handle. A name that matches no family, or two,
               is an error on that row rather than a guess.
+              {setup.positional && (
+                <>
+                  {" "}
+                  It is written into{" "}
+                  <s-text>{setup.column}</s-text> at that variant&rsquo;s
+                  position, which means rewriting its product&rsquo;s whole
+                  list. Every variant of a product you touch therefore has to
+                  end up with a family &mdash; the ones your file does not
+                  mention keep what they already have, and a product that would
+                  be left with a gap is refused.
+                </>
+              )}
             </s-paragraph>
 
             <s-paragraph>
@@ -589,6 +689,9 @@ export default function ColorFamilyPage() {
               blank, so a partly-filled spreadsheet cannot erase anything. A
               value that already matches is not written at all, so re-running
               the same file is free and a run that times out is safe to repeat.
+              Row order does not matter: a variant&rsquo;s position comes from
+              the store once the row has been matched, so the sheet can be
+              sorted or filtered freely.
             </s-paragraph>
 
             <label className={styles.fileField}>
@@ -605,7 +708,7 @@ export default function ColorFamilyPage() {
             <s-checkbox
               name={CLEAR_EMPTY_FIELD}
               label={`Remove variants whose ${FAMILY_COLUMN} cell is empty from their family`}
-              details="Off, an empty cell is skipped and nothing is erased. On, an empty cell deletes the metafield on that variant — which is how you clear a discontinued family across a catalogue. It never blanks a family's own fields, and every clear is shown in the review step first."
+              details="Off, an empty cell is skipped and nothing is erased. On, an empty cell removes that variant from its family — which is how you clear a discontinued family across a catalogue. With a positional list this is all-or-nothing per product: clearing every variant deletes the metafield, clearing only some is the gap the importer refuses. It never blanks a family's own fields, and every clear is shown in the review step first."
               {...(data?.step === "plan" && data.clearEmpty
                 ? { defaultChecked: true }
                 : {})}
@@ -645,6 +748,12 @@ export default function ColorFamilyPage() {
                     {plan.families.length === 1 ? "y" : "ies"} to edit
                   </s-badge>
                 )}
+                {plan.products.length > 0 && (
+                  <s-badge tone="info">
+                    {plan.products.length} product metafield
+                    {plan.products.length === 1 ? "" : "s"}
+                  </s-badge>
+                )}
                 {plan.clearCount > 0 && (
                   <s-badge tone="critical">
                     {plan.clearCount} to unassign
@@ -662,6 +771,10 @@ export default function ColorFamilyPage() {
                 removal(s), and {plan.familyFieldCount} field value(s) across{" "}
                 {plan.families.length} family entr
                 {plan.families.length === 1 ? "y" : "ies"}.
+                {plan.owner === "product" &&
+                  ` Those assignments are written as ${plan.products.length} ${
+                    plan.positional ? "rebuilt list(s)" : "value(s)"
+                  } — one per product, not one per row.`}
               </s-paragraph>
 
               {plan.unknownColumns.length > 0 && (
@@ -679,6 +792,31 @@ export default function ColorFamilyPage() {
                     Read and not written: {plan.ignoredColumns.join(", ")}
                   </s-paragraph>
                 </s-banner>
+              )}
+
+              {plan.products.length > 0 && (
+                <div className={styles.tableScroll}>
+                  <s-table>
+                    <s-table-header-row>
+                      <s-table-header>Product</s-table-header>
+                      <s-table-header>From rows</s-table-header>
+                      <s-table-header>Per-variant changes</s-table-header>
+                    </s-table-header-row>
+                    <s-table-body>
+                      {plan.products.map((change) => (
+                        <s-table-row key={change.productId}>
+                          <s-table-cell>{change.label}</s-table-cell>
+                          <s-table-cell>{change.rowNumbers.length}</s-table-cell>
+                          <s-table-cell>
+                            {change.value == null
+                              ? "cleared"
+                              : change.changes.join("; ")}
+                          </s-table-cell>
+                        </s-table-row>
+                      ))}
+                    </s-table-body>
+                  </s-table>
+                </div>
               )}
 
               {plan.families.length > 0 && (
@@ -775,7 +913,8 @@ export default function ColorFamilyPage() {
           <s-stack direction="block" gap="base">
             <s-banner tone={data.failures.length ? "warning" : "success"}>
               <s-paragraph>
-                {data.assigned} variant(s) assigned, {data.cleared} unassigned,{" "}
+                {data.variants} variant(s) changed across {data.assigned}{" "}
+                write(s) and {data.cleared} removal(s),{" "}
                 {data.families} family entr
                 {data.families === 1 ? "y" : "ies"} updated,{" "}
                 {data.failures.length} failed.
