@@ -5,6 +5,8 @@
 // `metaobject: MetaobjectUpsertInput!` argument on this version — the shorter
 // `values: JSON` form exists only on newer versions and will not compile here.
 
+import { adminQuery } from "./admin-query.server";
+
 /**
  * The shape we need from the object `authenticate.admin()` returns. Declared
  * structurally so this module does not depend on the library's exported type
@@ -56,29 +58,21 @@ const PAGE_SIZE = 250;
 type PageInfo = { hasNextPage: boolean; endCursor: string | null };
 
 /** The `userErrors` shape shared by both metaobject mutations. */
-type UserError = { field: string[] | null; message: string; code: string | null };
+type UserError = {
+  field: string[] | null;
+  message: string;
+  code: string | null;
+};
 
 /** Run an operation and surface transport and GraphQL errors as exceptions. */
-async function query<T>(
-  admin: Admin,
-  document: string,
-  variables?: Record<string, unknown>,
-): Promise<T> {
-  const response = await admin.graphql(document, { variables });
-  const body = (await response.json()) as {
-    data?: T;
-    errors?: { message: string }[];
-  };
-
-  // A GraphQL API can return HTTP 200 with a populated `errors` array, so the
-  // status alone is not enough to conclude the call succeeded.
-  if (!response.ok || body.errors) {
-    const detail = body.errors?.map((error) => error.message).join("; ");
-    throw new Error(detail || `Admin API request failed (${response.status})`);
-  }
-
-  return body.data as T;
-}
+/**
+ * One Admin API call.
+ *
+ * Thin by design: `adminQuery` is the shared one, and it waits out `THROTTLED`
+ * rather than throwing on it — see `admin-query.server.ts` for why that is not
+ * optional once a page walks a whole catalogue.
+ */
+const query = adminQuery;
 
 /** Turn mutation user errors into one readable line each. */
 function formatUserErrors(userErrors: UserError[]): string[] {
@@ -215,9 +209,13 @@ export async function getDefinition(
   admin: Admin,
   type: string,
 ): Promise<Definition | null> {
-  const data = await query<DefinitionByTypeResponse>(admin, DEFINITION_BY_TYPE, {
-    type,
-  });
+  const data = await query<DefinitionByTypeResponse>(
+    admin,
+    DEFINITION_BY_TYPE,
+    {
+      type,
+    },
+  );
   const node = data.metaobjectDefinitionByType;
   if (!node) return null;
 
@@ -391,7 +389,9 @@ export async function createDefinition(
     definition: {
       type: definition.type,
       name: definition.name,
-      ...(definition.description ? { description: definition.description } : {}),
+      ...(definition.description
+        ? { description: definition.description }
+        : {}),
       ...(definition.displayNameKey
         ? { displayNameKey: definition.displayNameKey }
         : {}),

@@ -5,6 +5,8 @@
 // metaobjects. The `Admin` shape and the error handling are the same, and are
 // duplicated rather than shared so neither module constrains the other.
 
+import { adminQuery } from "./admin-query.server";
+
 /** Structural, for the same reason as in `metaobjects.server.ts`. */
 type Admin = {
   graphql: (
@@ -63,7 +65,11 @@ export type ProductRichText = {
 };
 
 type PageInfo = { hasNextPage: boolean; endCursor: string | null };
-type UserError = { field: string[] | null; message: string; code: string | null };
+type UserError = {
+  field: string[] | null;
+  message: string;
+  code: string | null;
+};
 
 // Metafield lookups are the expensive part of the product query, so this pages
 // smaller than the 250 the connection allows to stay inside the query cost
@@ -77,24 +83,14 @@ const TITLE_BATCH_SIZE = 20;
 /** `metafieldsSet` accepts at most 25 metafields per call. */
 const METAFIELD_BATCH_SIZE = 25;
 
-async function query<T>(
-  admin: Admin,
-  document: string,
-  variables?: Record<string, unknown>,
-): Promise<T> {
-  const response = await admin.graphql(document, { variables });
-  const body = (await response.json()) as {
-    data?: T;
-    errors?: { message: string }[];
-  };
-
-  if (!response.ok || body.errors) {
-    const detail = body.errors?.map((error) => error.message).join("; ");
-    throw new Error(detail || `Admin API request failed (${response.status})`);
-  }
-
-  return body.data as T;
-}
+/**
+ * One Admin API call.
+ *
+ * Thin by design: `adminQuery` is the shared one, and it waits out `THROTTLED`
+ * rather than throwing on it — see `admin-query.server.ts` for why that is not
+ * optional once a page walks a whole catalogue.
+ */
+const query = adminQuery;
 
 function formatUserErrors(userErrors: UserError[]): string[] {
   return userErrors.map((error) =>
@@ -205,7 +201,11 @@ export async function listMetafieldDefinitions(
         pinned: node.pinnedPosition != null,
         storefrontAccess: node.access?.storefront ?? null,
         ...(metaobjectDefinitionIdOf(node.validations)
-          ? { metaobjectDefinitionId: metaobjectDefinitionIdOf(node.validations)! }
+          ? {
+              metaobjectDefinitionId: metaobjectDefinitionIdOf(
+                node.validations,
+              )!,
+            }
           : {}),
       });
     }
@@ -281,7 +281,9 @@ export async function createMetafieldDefinition(
       // read it, so a theme has nothing to render — which looks like the
       // import having done nothing.
       access: { storefront: "PUBLIC_READ" },
-      ...(definition.description ? { description: definition.description } : {}),
+      ...(definition.description
+        ? { description: definition.description }
+        : {}),
       // The validation is what lets a CSV cell hold a bare handle instead of
       // "type:handle" — the importer reads it back to learn which definition
       // the handles belong to.

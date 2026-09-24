@@ -147,12 +147,27 @@ const CLEAR_EMPTY_FIELD = "clearEmpty";
  * with `offset` naming where to start, and stitches the answers back together.
  * See `postWindow` in the component for the client half.
  *
- * Fifty is chosen to leave the slowest plausible window — fifty products that
- * each need four writes — a wide margin inside those 300 seconds. It is not a
- * limit anyone has to think about: the file size limit below is what a person
- * sees, and it is the whole file, not one request's worth.
+ * Twenty-five, down from the fifty this started at, because of the leaky
+ * bucket. The product lookup is the most expensive query in the app and a
+ * window runs several of them before it writes anything; on a store whose
+ * bucket is already low, `adminQuery` waits out each `THROTTLED` answer rather
+ * than failing, and those waits are what a window's clock is really spent on.
+ * A smaller window absorbs them instead of running into the 300 seconds.
+ *
+ * It is not a limit anyone has to think about: the file size limit below is
+ * what a person sees, and that one is the whole file, not one request's worth.
  */
-const BATCH_PRODUCTS = 50;
+const BATCH_PRODUCTS = 25;
+
+/**
+ * How long a window may spend writing before it stops and hands back.
+ *
+ * The window size above is a guess at what fits; this is the measurement that
+ * catches the guess being wrong. Well under the 300 seconds nginx allows,
+ * because the plan for this window was read from the store before any of it was
+ * spent, and the answer still has to get back.
+ */
+const APPLY_BUDGET_MS = 150_000;
 
 /**
  * Products one file may cover.
@@ -695,11 +710,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const failures: string[] = [];
     let updated = 0;
 
+    // Products of this window actually written, which is not always all of
+    // them: the clock below can cut a window short, and the client resumes from
+    // wherever it stopped.
+    let processed = 0;
+    const startedAt = Date.now();
+
     // Sequential, the house style for the leaky bucket. The order within a
     // product matters too: a variant's inventory item must have been updated
     // before its quantity is set, or turning tracking on and setting a
     // quantity in the same run would fail on the second call.
     for (const product of built.plan.products) {
+      // Stop at the budget rather than at the window's edge.
+      //
+      // A window is sized for the common case, but the leaky bucket does not
+      // guarantee one: `adminQuery` waits out every `THROTTLED` answer, and a
+      // store whose bucket is already empty can make the same fifty products
+      // take minutes. Left alone that runs into nginx's 300 seconds, and a
+      // killed request tells the page nothing about what it managed to write.
+      //
+      // Checked only between products, never inside one, so a product is never
+      // left half-written — the one invariant the whole apply step rests on.
+      if (processed > 0 && Date.now() - startedAt > APPLY_BUDGET_MS) break;
+      processed++;
+
       // A SKU-keyed file has no handle or title to name a row by, so the key
       // stands in — without it every failure would read ": <message>".
       const label =
@@ -804,11 +838,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    return { step: "applied", updated, failures, batch: built.batch } as const;
+    // A window the clock cut short reports the smaller stretch it really did,
+    // and points the next request at the first product it did not reach.
+    const batch: BatchInfo =
+      processed >= built.batch.count
+        ? built.batch
+        : {
+            offset: built.batch.offset,
+            count: processed,
+            total: built.batch.total,
+            nextOffset: built.batch.offset + processed,
+          };
+
+    return { step: "applied", updated, failures, batch } as const;
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     return {
       step: "error",
-      message: error instanceof Error ? error.message : String(error),
+      // "Throttled" is the API's word, not an explanation. By the time one
+      // reaches here `adminQuery` has already waited and retried several times,
+      // so the useful thing to say is that the store's API budget is genuinely
+      // exhausted and that stopping here costs nothing.
+      message: /throttl/i.test(message)
+        ? "Shopify is still rate-limiting this store after several retries. Nothing is wrong with the file: wait a minute and run it again. Everything written so far stays written, and a value that already matches is never written twice."
+        : message,
     } as const;
   }
 };
@@ -1086,6 +1139,37 @@ export default function ProductUpdatePage() {
     [fetcher, setSubmitError],
   );
 
+  /**
+   * Pick a stopped writing run back up where it left off.
+   *
+   * Re-running the whole file would also be correct — a value that already
+   * matches is not written again — but it would re-read every product that is
+   * already done, and re-reading is exactly what exhausts the API budget that
+   * stopped the run in the first place.
+   */
+  const resumeApply = () => {
+    if (!applyTotals || applyTotals.done >= applyTotals.total) return;
+    if (!postWindow("apply", applyTotals.done)) return;
+    setRun({
+      intent: "apply",
+      offset: applyTotals.done,
+      done: applyTotals.done,
+      total: applyTotals.total,
+    });
+  };
+
+  /** The same, for a review that stopped short. Reading is cheap but not free. */
+  const resumeReview = () => {
+    if (!planTotals || planTotals.planned >= planTotals.total) return;
+    if (!postWindow("", planTotals.planned)) return;
+    setRun({
+      intent: "",
+      offset: planTotals.planned,
+      done: planTotals.planned,
+      total: planTotals.total,
+    });
+  };
+
   /** Start a run at the top of the file, discarding what a previous one said. */
   const submitWith = (intent: "" | "apply") => () => {
     setApplyTotals(null);
@@ -1360,9 +1444,11 @@ export default function ProductUpdatePage() {
                   {MAX_ROWS.toLocaleString()} rows. Long files are reviewed and
                   written in batches of {BATCH_PRODUCTS}, one after another,
                   with the progress shown as it goes;{" "}
-                  <strong>leave this page open</strong> until it finishes. If it
-                  stops part way, everything before that point is already
-                  written and re-running the same file finishes the rest.
+                  <strong>leave this page open</strong> until it finishes. When
+                  Shopify rate-limits the store the app waits and carries on by
+                  itself, so a long run is slow rather than broken. If one does
+                  stop part way, everything before that point is already written
+                  and a button offers to continue from there.
                 </s-paragraph>
 
                 <s-paragraph>
@@ -1599,12 +1685,18 @@ export default function ProductUpdatePage() {
                   run again. */}
               {run === null && plan.planned < plan.total && (
                 <s-banner tone="warning">
-                  <s-paragraph>
-                    The review stopped after {plan.planned} of {plan.total}{" "}
-                    products, so these counts cover only that much of the file.
-                    Press <s-text type="strong">Review changes</s-text> again to
-                    start over.
-                  </s-paragraph>
+                  <s-stack direction="block" gap="small-200">
+                    <s-paragraph>
+                      The review stopped after {plan.planned} of {plan.total}{" "}
+                      products, so these counts cover only part of the file and
+                      nothing can be applied from them yet.
+                    </s-paragraph>
+                    <Actions>
+                      <s-button type="button" onClick={resumeReview}>
+                        Continue reviewing from product {plan.planned + 1}
+                      </s-button>
+                    </Actions>
+                  </s-stack>
                 </s-banner>
               )}
 
@@ -1799,6 +1891,29 @@ export default function ProductUpdatePage() {
                 collections.
               </s-paragraph>
             </s-banner>
+
+            {/* The run stopped before the end of the file — throttled, or a
+                window that failed. Continuing beats starting over: the products
+                before this point are done, and re-reading them is what would
+                empty the API budget again. */}
+            {run === null && applyTotals.done < applyTotals.total && (
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  {applyTotals.done} of {applyTotals.total} products were
+                  written before the run stopped. The rest have not been touched
+                  yet.
+                </s-paragraph>
+                <Actions>
+                  <s-button
+                    type="button"
+                    variant="primary"
+                    onClick={resumeApply}
+                  >
+                    Continue from product {applyTotals.done + 1}
+                  </s-button>
+                </Actions>
+              </s-stack>
+            )}
 
             {applyTotals.failures.length > 0 && (
               <s-unordered-list>

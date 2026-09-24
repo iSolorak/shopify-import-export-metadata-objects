@@ -20,6 +20,8 @@
 // Needs `read_products`, which the app's existing `write_products` already
 // grants, so this adds no scope.
 
+import { adminQuery } from "./admin-query.server";
+
 /** Structural, matching the other server modules in this app. */
 type Admin = {
   graphql: (
@@ -59,24 +61,14 @@ type PageInfo = { hasNextPage: boolean; endCursor: string | null };
  */
 const RESOLVE_BATCH_SIZE = 100;
 
-async function query<T>(
-  admin: Admin,
-  document: string,
-  variables?: Record<string, unknown>,
-): Promise<T> {
-  const response = await admin.graphql(document, { variables });
-  const body = (await response.json()) as {
-    data?: T;
-    errors?: { message: string }[];
-  };
-
-  if (!response.ok || body.errors) {
-    const detail = body.errors?.map((error) => error.message).join("; ");
-    throw new Error(detail || `Admin API request failed (${response.status})`);
-  }
-
-  return body.data as T;
-}
+/**
+ * One Admin API call.
+ *
+ * Thin by design: `adminQuery` is the shared one, and it waits out `THROTTLED`
+ * rather than throwing on it — see `admin-query.server.ts` for why that is not
+ * optional once a page walks a whole catalogue.
+ */
+const query = adminQuery;
 
 const DEFINITIONS = `#graphql
   query TranslationMetafieldDefinitions($cursor: String) {

@@ -17,6 +17,7 @@
 import { createHash } from "node:crypto";
 
 import { imageExtensionOf } from "./file-cells";
+import { adminQuery } from "./admin-query.server";
 
 /** Structural, for the same reason as in `metaobjects.server.ts`. */
 type Admin = {
@@ -26,7 +27,11 @@ type Admin = {
   ) => Promise<Response>;
 };
 
-type UserError = { field: string[] | null; message: string; code?: string | null };
+type UserError = {
+  field: string[] | null;
+  message: string;
+  code?: string | null;
+};
 type PageInfo = { hasNextPage: boolean; endCursor: string | null };
 
 /** Filenames per lookup query. Each term is an OR in one search string. */
@@ -43,24 +48,14 @@ const LOOKUP_PAGE_SIZE = 50;
  */
 const CREATE_BATCH_SIZE = 25;
 
-async function query<T>(
-  admin: Admin,
-  document: string,
-  variables?: Record<string, unknown>,
-): Promise<T> {
-  const response = await admin.graphql(document, { variables });
-  const body = (await response.json()) as {
-    data?: T;
-    errors?: { message: string }[];
-  };
-
-  if (!response.ok || body.errors) {
-    const detail = body.errors?.map((error) => error.message).join("; ");
-    throw new Error(detail || `Admin API request failed (${response.status})`);
-  }
-
-  return body.data as T;
-}
+/**
+ * One Admin API call.
+ *
+ * Thin by design: `adminQuery` is the shared one, and it waits out `THROTTLED`
+ * rather than throwing on it — see `admin-query.server.ts` for why that is not
+ * optional once a page walks a whole catalogue.
+ */
+const query = adminQuery;
 
 function formatUserErrors(userErrors: UserError[]): string[] {
   return userErrors.map((error) =>
