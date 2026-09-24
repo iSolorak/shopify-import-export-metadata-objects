@@ -72,6 +72,26 @@ export function Steps({
  * so it submits under its `name` in the same multipart POST the raw input did,
  * and it brings drag-and-drop, the admin's own focus ring, and both themes for
  * free.
+ *
+ * ## Why `required` is not passed to the element
+ *
+ * It is deliberately withheld, and the requirement is carried on a data
+ * attribute instead. Polaris documents `required` on a field as semantic only —
+ * "it will not cause an error to appear automatically" — but the element is
+ * form-associated, so the flag still reaches constraint validation, and a form
+ * containing an invalid custom element does not submit.
+ *
+ * A native input that fails validation gets the browser's "Please select a
+ * file" bubble pointing at it. A custom element gets nothing: the submit is
+ * blocked, no request is made, no message appears, and the button reads as
+ * broken. That is precisely what it did — upload a CSV on the product update
+ * page and the button did nothing at all.
+ *
+ * Dropping the attribute means the form always submits. Emptiness is then
+ * caught where it was already handled properly: every action here opens by
+ * rejecting a missing file with "Choose a CSV file first." The three pages that
+ * submit programmatically go one better and catch it in the browser via
+ * `readForm`, which reads `data-required` and shows the message on the field.
  */
 export function CsvDropZone({
   name = "file",
@@ -93,11 +113,88 @@ export function CsvDropZone({
       name={name}
       label={label}
       accept={accept}
-      {...(required ? { required: true } : {})}
+      {...(required ? { "data-required": "" } : {})}
       {...(multiple ? { multiple: true } : {})}
       {...(onChange ? { onChange } : {})}
     />
   );
+}
+
+/**
+ * Validate a form and read it into `FormData`, handling `s-drop-zone` itself.
+ *
+ * Three pages here submit programmatically from a click handler rather than
+ * letting the browser do it (see the header of `app.product-update.tsx` for
+ * why). Those were written against a native `<input type="file">`, where
+ * `form.reportValidity()` and `new FormData(form)` are all you need. A
+ * form-associated custom element is not reliably either of those things:
+ *
+ *  - `reportValidity()` consults the element's `ElementInternals` validity. If
+ *    the drop zone has not published a valid state for a file it is holding,
+ *    the form reports invalid, the submit handler returns early, and **nothing
+ *    at all happens** — no request, no message, no indication the click landed.
+ *  - `new FormData(form)` takes whatever the element passed to `setFormValue`.
+ *    A file control that publishes its value as a string path contributes a
+ *    name, not a `File`, and the action's `instanceof File` check rejects it.
+ *
+ * Neither is worth betting the page's only button on, so this does not ask the
+ * element for either. It reads `.files` off the drop zone directly — the
+ * property the Polaris type declares and the wrapped `<input>` owns — checks
+ * the required ones itself, validates the native controls the ordinary way,
+ * and appends the files to the `FormData` by hand.
+ *
+ * Returns `null` when something is invalid, having already shown the user why.
+ */
+type DropZoneElement = HTMLElement & {
+  files?: readonly File[];
+};
+
+export function readForm(form: HTMLFormElement): FormData | null {
+  const zones = Array.from(
+    form.querySelectorAll<DropZoneElement>("s-drop-zone"),
+  );
+
+  // A missing file used to surface as the browser's "Please select a file"
+  // bubble on the native input. There is no equivalent to trigger on a custom
+  // element, so say it in the page instead — silence here is exactly the bug
+  // this function exists to fix.
+  for (const zone of zones) {
+    // `data-required`, not `required` — see `CsvDropZone` for why the element
+    // is never given the real attribute.
+    const required = zone.hasAttribute("data-required");
+    if (required && !zone.files?.length) {
+      zone.scrollIntoView({ block: "center", behavior: "smooth" });
+      zone.focus?.();
+      zone.setAttribute("error", "Choose a CSV file first.");
+      return null;
+    }
+    zone.removeAttribute("error");
+  }
+
+  // The native controls, checked the ordinary way. `form.elements` includes the
+  // drop zones, whose validity was just decided above on better evidence.
+  for (const element of Array.from(form.elements)) {
+    if (element.tagName.toLowerCase() === "s-drop-zone") continue;
+    const candidate = element as HTMLInputElement;
+    if (typeof candidate.checkValidity !== "function") continue;
+    if (!candidate.checkValidity()) {
+      candidate.reportValidity();
+      return null;
+    }
+  }
+
+  const formData = new FormData(form);
+
+  // Replace whatever the element contributed under its own name — possibly
+  // nothing, possibly a string — with the actual `File` objects.
+  for (const zone of zones) {
+    const name = zone.getAttribute("name");
+    if (!name || !zone.files?.length) continue;
+    formData.delete(name);
+    for (const file of zone.files) formData.append(name, file);
+  }
+
+  return formData;
 }
 
 /**

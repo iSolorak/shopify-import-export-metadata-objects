@@ -45,6 +45,7 @@ import { Guide } from "../components/ui/Guide";
 import {
   Actions,
   CsvDropZone,
+  readForm,
   Steps,
   TableScroll,
 } from "../components/ui/ImportFlow";
@@ -504,11 +505,14 @@ export default function VariantMetafieldsPage() {
     const form = formRef.current;
     if (!form) return;
     // A programmatic submit skips the constraint validation a native one runs,
-    // and the file input is `required` — without this, forgetting to choose a
+    // and the CSV field is `required` — without this, forgetting to choose a
     // file would round-trip to the server just to be told so.
-    if (!form.reportValidity()) return;
-
-    const formData = new FormData(form);
+    //
+    // `readForm` rather than `reportValidity()` + `new FormData(form)`: the
+    // field is an `s-drop-zone`, and neither of those handles a form-associated
+    // custom element reliably. See `readForm` in components/ui/ImportFlow.
+    const formData = readForm(form);
+    if (!formData) return;
     formData.set("intent", intent);
     fetcher.submit(formData, {
       method: "post",
