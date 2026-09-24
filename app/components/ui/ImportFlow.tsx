@@ -292,13 +292,27 @@ export function readForm(form: HTMLFormElement): FormData | null {
 /**
  * A row of buttons.
  *
- * `s-button-group` already knows Shopify's 8px gap and how to wrap on a narrow
- * screen, which is what the hand-written `.actions` flexbox in each route was
- * reimplementing — at 12px, so every button row in the app was one step wider
- * than the admin's.
+ * A plain flex row, deliberately — **not** `s-button-group`.
+ *
+ * `s-button-group` looked like the right component and is not usable here. In
+ * the deployed runtime (`cdn.shopify.com/shopifycloud/polaris.js`) its shadow
+ * root renders `<div class="button-group" role="group">` with no `<slot>`, and
+ * its light-DOM children are never assigned one: `assignedSlot` is null and the
+ * button measures 0×0. The same button in a plain `<div>` measures 94×28. It
+ * behaves this way for every `variant` — `primary`, `secondary`, `auto` and
+ * unset alike — so there is no spelling of it that works.
+ *
+ * Using it made every button in this app invisible: the page still responded to
+ * a click, because a 0×0 element is still clickable programmatically, but there
+ * was nothing on screen to click. That is what "I upload a CSV and nothing
+ * happens" was — the button was never drawn.
+ *
+ * The gap is the one thing worth keeping from that attempt. Shopify's
+ * `--p-space-button-group-gap` is 8px; the hand-written rows this replaced all
+ * used 12px, so every button row in the app sat a step wider than the admin's.
  */
 export function Actions({ children }: { children: ReactNode }) {
-  return <s-button-group gap="base">{children}</s-button-group>;
+  return <div className={styles.actions}>{children}</div>;
 }
 
 /** The counts an import plan produces, as one scannable row of badges. */

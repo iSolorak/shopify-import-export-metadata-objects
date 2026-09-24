@@ -1,5 +1,27 @@
 /* Shared furniture for the import pages. See ImportFlow.tsx. */
 
+/* Button row. `s-button-group` does not render its children in the deployed
+   Polaris runtime — see `Actions` — so this is a plain flex row at Shopify's
+   own button-group gap. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-button-group-gap);
+}
+
+.actions > * {
+  flex: 0 1 auto;
+}
+
+/* Side by side is cramped below roughly a phone's width; let each button take
+   the full row instead of shrinking its label to two lines. */
+@media (max-width: 30rem) {
+  .actions > * {
+    flex: 1 1 100%;
+  }
+}
+
 .steps {
   display: flex;
   flex-wrap: wrap;
