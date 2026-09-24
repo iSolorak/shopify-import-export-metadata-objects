@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import styles from "./ImportFlow.module.css";
 
@@ -63,6 +63,11 @@ export function Steps({
   );
 }
 
+/** The bits of `s-drop-zone` this file touches. */
+type DropZoneElement = HTMLElement & {
+  files?: readonly File[];
+};
+
 /**
  * The CSV file field.
  *
@@ -73,25 +78,18 @@ export function Steps({
  * and it brings drag-and-drop, the admin's own focus ring, and both themes for
  * free.
  *
- * ## Why `required` is not passed to the element
+ ## Why `required` is carried on `data-required`
  *
- * It is deliberately withheld, and the requirement is carried on a data
- * attribute instead. Polaris documents `required` on a field as semantic only —
- * "it will not cause an error to appear automatically" — but the element is
- * form-associated, so the flag still reaches constraint validation, and a form
- * containing an invalid custom element does not submit.
+ * Polaris documents `required` on a field as semantic only — "it will not cause
+ * an error to appear automatically". Driving the real Polaris runtime in a
+ * browser confirms it: `s-drop-zone` never calls `setValidity`, so `required`
+ * contributes nothing to constraint validation and an empty one leaves
+ * `form.checkValidity()` true. It would therefore neither block a submit nor
+ * tell anyone the field was empty — the worst of both.
  *
- * A native input that fails validation gets the browser's "Please select a
- * file" bubble pointing at it. A custom element gets nothing: the submit is
- * blocked, no request is made, no message appears, and the button reads as
- * broken. That is precisely what it did — upload a CSV on the product update
- * page and the button did nothing at all.
- *
- * Dropping the attribute means the form always submits. Emptiness is then
- * caught where it was already handled properly: every action here opens by
- * rejecting a missing file with "Choose a CSV file first." The three pages that
- * submit programmatically go one better and catch it in the browser via
- * `readForm`, which reads `data-required` and shows the message on the field.
+ * The requirement is kept on `data-required` so `readForm` can enforce it
+ * itself and say so on the field. The server still has the last word: every
+ * action here opens by rejecting a missing file with "Choose a CSV file first."
  */
 export function CsvDropZone({
   name = "file",
@@ -99,25 +97,88 @@ export function CsvDropZone({
   accept = ".csv,text/csv",
   required = true,
   multiple = false,
-  onChange,
+  onFiles,
 }: {
   name?: string;
   label?: string;
   accept?: string;
   required?: boolean;
   multiple?: boolean;
-  onChange?: (event: Event) => void;
+  /**
+   * Called with the chosen files as soon as the user picks them.
+   *
+   * Subscribed with a real `addEventListener`, not a React `onChange` prop.
+   * React's synthetic events are wired for the elements React knows about; on
+   * a custom element an `onChange` prop is not reliably the element's own
+   * `change`. The element dispatches a composed `change` on its host once
+   * `.files` is populated, so listening natively is both simpler and correct.
+   */
+  onFiles?: (files: File[]) => void;
 }) {
+  // The listener is attached through a wrapper rather than a `ref` on the
+  // element itself: the Polaris JSX types model `ref` as `Ref<DropZone>`, and
+  // narrowing it to the handful of members used here makes TypeScript give up
+  // ("union type that is too complex to represent"). `display: contents` means
+  // the wrapper adds no box and no layout of its own.
+  const wrapper = useRef<HTMLSpanElement | null>(null);
+
+  // Held in a ref so the subscription does not tear down and re-attach on
+  // every render just because the caller passed a new closure.
+  const latest = useRef(onFiles);
+  latest.current = onFiles;
+
+  useEffect(() => {
+    const element =
+      wrapper.current?.querySelector<DropZoneElement>("s-drop-zone");
+    if (!element) return;
+    const handle = () => latest.current?.(Array.from(element.files ?? []));
+    element.addEventListener("change", handle);
+    return () => element.removeEventListener("change", handle);
+  }, []);
+
   return (
-    <s-drop-zone
-      name={name}
-      label={label}
-      accept={accept}
-      {...(required ? { "data-required": "" } : {})}
-      {...(multiple ? { multiple: true } : {})}
-      {...(onChange ? { onChange } : {})}
-    />
+    <span ref={wrapper} style={{ display: "contents" }}>
+      <s-drop-zone
+        name={name}
+        label={label}
+        accept={accept}
+        {...(required ? { "data-required": "" } : {})}
+        {...(multiple ? { multiple: true } : {})}
+      />
+    </span>
   );
+}
+
+/**
+ * Warn when a submit finishes having rendered nothing.
+ *
+ * React Router gives a fetcher no `data` when the action never returned one —
+ * a thrown response, an auth redirect the iframe swallowed, a body the proxy
+ * refused because the upload was too large. Each of those leaves the screen
+ * exactly as it was, which is indistinguishable from a button that does not
+ * work, and is what "I uploaded a CSV and nothing happened" usually is.
+ *
+ * Returns the message to show, and a setter so the page can raise its own.
+ */
+export function useSubmitFeedback(state: string, data: unknown) {
+  const [error, setError] = useState<string | null>(null);
+  const wasSubmitting = useRef(false);
+
+  useEffect(() => {
+    if (state !== "idle") {
+      wasSubmitting.current = true;
+      return;
+    }
+    if (!wasSubmitting.current) return;
+    wasSubmitting.current = false;
+    if (data === undefined) {
+      setError(
+        "The server did not return a response. If the file is large, try splitting it — an upload can be refused before it reaches the app.",
+      );
+    }
+  }, [state, data]);
+
+  return [error, setError] as const;
 }
 
 /**
@@ -145,10 +206,6 @@ export function CsvDropZone({
  *
  * Returns `null` when something is invalid, having already shown the user why.
  */
-type DropZoneElement = HTMLElement & {
-  files?: readonly File[];
-};
-
 export function readForm(form: HTMLFormElement): FormData | null {
   const zones = Array.from(
     form.querySelectorAll<DropZoneElement>("s-drop-zone"),

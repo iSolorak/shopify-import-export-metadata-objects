@@ -45,6 +45,7 @@ import {
   Actions,
   CsvDropZone,
   readForm,
+  useSubmitFeedback,
   Steps,
   TableScroll,
 } from "../components/ui/ImportFlow";
@@ -452,6 +453,13 @@ export default function ColorFamilyPage() {
     }
   };
 
+  // A submit that renders nothing is indistinguishable from a dead button;
+  // say so instead. See `useSubmitFeedback`.
+  const [submitError, setSubmitError] = useSubmitFeedback(
+    fetcher.state,
+    fetcher.data,
+  );
+
   const submitWith = (intent: string) => () => {
     const form = formRef.current;
     if (!form) return;
@@ -463,7 +471,11 @@ export default function ColorFamilyPage() {
     // field is an `s-drop-zone`, and neither of those handles a form-associated
     // custom element reliably. See `readForm` in components/ui/ImportFlow.
     const formData = readForm(form);
-    if (!formData) return;
+    if (!formData) {
+      setSubmitError("Choose a CSV file first.");
+      return;
+    }
+    setSubmitError(null);
     formData.set("intent", intent);
     fetcher.submit(formData, {
       method: "post",
@@ -741,6 +753,12 @@ export default function ColorFamilyPage() {
             </Guide>
 
             <CsvDropZone name="file" label="CSV file" accept=".csv,text/csv" />
+
+            {submitError && (
+              <s-banner tone="critical" heading="That did not go through">
+                <s-paragraph>{submitError}</s-paragraph>
+              </s-banner>
+            )}
 
             <s-checkbox
               name={CLEAR_EMPTY_FIELD}

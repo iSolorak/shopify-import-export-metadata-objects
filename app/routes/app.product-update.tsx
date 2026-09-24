@@ -58,6 +58,7 @@ import {
   Actions,
   CsvDropZone,
   readForm,
+  useSubmitFeedback,
   Steps,
   TableScroll,
 } from "../components/ui/ImportFlow";
@@ -744,6 +745,14 @@ export default function ProductUpdatePage() {
           ? 2
           : 1;
 
+  // Anything that stops a submit, said out loud. This page's failure mode used
+  // to be silence: a click that validated wrong, or a request that came back
+  // empty, left the screen exactly as it was and the button looking dead.
+  const [submitError, setSubmitError] = useSubmitFeedback(
+    fetcher.state,
+    fetcher.data,
+  );
+
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -878,7 +887,11 @@ export default function ProductUpdatePage() {
     // field is an `s-drop-zone`, and neither of those handles a form-associated
     // custom element reliably. See `readForm` in components/ui/ImportFlow.
     const formData = readForm(form);
-    if (!formData) return;
+    if (!formData) {
+      setSubmitError("Choose a CSV file first.");
+      return;
+    }
+    setSubmitError(null);
     if (intent) formData.set("intent", intent);
     fetcher.submit(formData, {
       method: "post",
@@ -1052,12 +1065,38 @@ export default function ProductUpdatePage() {
               </s-stack>
             </Guide>
 
-            <CsvDropZone name="file" label="CSV file" accept=".csv,text/csv" />
+            {/* Choosing the file runs the first step on its own. Reading a
+                file's column names writes nothing, so there is no reason to
+                make someone pick a file and then hunt for a button to say
+                "yes, really" — and a page that sits still after an upload is
+                indistinguishable from a broken one. The button stays for
+                re-running it, and for anyone who arrives by keyboard. */}
+            <CsvDropZone
+              name="file"
+              label="CSV file"
+              accept=".csv,text/csv"
+              onFiles={(files) => {
+                if (!files.length) return;
+                setSubmitError(null);
+                // Only before a report exists: once the mapping controls are on
+                // screen they are part of this form, and re-submitting with them
+                // would plan the new file against the old file's mapping.
+                if (!report) submitWith("")();
+              }}
+            />
+
+            {submitError && (
+              <s-banner tone="critical" heading="That did not go through">
+                <s-paragraph>{submitError}</s-paragraph>
+              </s-banner>
+            )}
 
             {!report && (
               <Actions>
                 <s-button
                   type="button"
+                  variant="primary"
+                  icon="import"
                   onClick={submitWith("")}
                   {...(busy ? { loading: true } : {})}
                 >
