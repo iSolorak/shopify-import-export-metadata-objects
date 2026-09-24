@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
@@ -97,9 +97,27 @@ import {
 // The file is re-posted on every step rather than echoed back through a hidden
 // field. A product export runs to megabytes and round-tripping it through the
 // browser twice is pure waste when the file input is still sitting in the form.
+//
+// The last two steps are also **windowed**. A whole catalogue cannot be planned
+// or written inside one 300-second request, so each of those steps posts the
+// same form once per `BATCH_PRODUCTS` products, with `offset` naming where to
+// start, and the page stitches the answers together as they arrive. That is
+// what replaced the old 200-product ceiling, which made a 243-product export
+// into three hand-split files. Nothing else about the step changed: the same
+// plan is built from the same rows against the same store, one window at a
+// time, and the server holds no state between windows.
 
 const MAPPING_PREFIX = "map:";
 const LOCATION_FIELD = "locationId";
+
+/**
+ * Which window of the file a request is for.
+ *
+ * Set on the `FormData` at the moment of submitting rather than kept in a
+ * hidden input, for the same reason `intent` is: a value a click handler writes
+ * into the DOM is a value the next submit might read stale.
+ */
+const OFFSET_FIELD = "offset";
 
 /**
  * The one switch that reverses this page's central safety rule.
@@ -120,18 +138,34 @@ const LOCATION_FIELD = "locationId";
 const CLEAR_EMPTY_FIELD = "clearEmpty";
 
 /**
- * Products per run.
+ * Products handled by one request.
  *
- * Each one costs up to four Admin API calls, and
- * `deploy/nginx/shopify-app.conf` gives the request 300 seconds. Because a
- * blank cell is skipped and an unchanged value is not a write, running the same
- * file again after a timeout is free for everything that already landed — which
- * is the documented answer to a catalogue larger than this.
+ * Each one costs up to four Admin API calls and
+ * `deploy/nginx/shopify-app.conf` gives the request 300 seconds, so a whole
+ * catalogue cannot be planned or written in a single POST. It is cut into
+ * windows of this size instead: the page posts the same form once per window,
+ * with `offset` naming where to start, and stitches the answers back together.
+ * See `postWindow` in the component for the client half.
+ *
+ * Fifty is chosen to leave the slowest plausible window — fifty products that
+ * each need four writes — a wide margin inside those 300 seconds. It is not a
+ * limit anyone has to think about: the file size limit below is what a person
+ * sees, and it is the whole file, not one request's worth.
  */
-const MAX_PRODUCTS = 200;
+const BATCH_PRODUCTS = 50;
+
+/**
+ * Products one file may cover.
+ *
+ * Far above the old 200 — which is what made a 243-product export into three
+ * hand-split files — because a run is no longer one request. This is now only a
+ * sanity bound on how long a windowed run may take in total; the file is
+ * re-posted per window, so it is also what keeps that traffic finite.
+ */
+const MAX_PRODUCTS = 2000;
 
 /** Rows read from the file, before grouping. A per-variant export is long. */
-const MAX_ROWS = 5000;
+const MAX_ROWS = 20000;
 
 type ColumnReport = {
   columns: string[];
@@ -146,13 +180,32 @@ type ColumnReport = {
   clearEmpty: boolean;
 };
 
+/**
+ * Where a windowed answer sits in the file it came from.
+ *
+ * `nextOffset` is the only thing the client needs to decide whether to ask
+ * again, and it is `null` on the last window — the server owns the arithmetic
+ * so the page cannot walk off the end of the file by miscounting.
+ */
+type BatchInfo = {
+  /** First product of this window, counting from 0. */
+  offset: number;
+  /** Products covered by the window. */
+  count: number;
+  /** Products in the whole file. */
+  total: number;
+  /** Where the next request should start, or `null` when this was the last. */
+  nextOffset: number | null;
+};
+
 type ActionData =
   | ({ step: "inspect" } & ColumnReport)
-  | ({ step: "plan"; plan: ImportPlan } & ColumnReport)
+  | ({ step: "plan"; plan: ImportPlan; batch: BatchInfo } & ColumnReport)
   | {
       step: "applied";
       updated: number;
       failures: string[];
+      batch: BatchInfo;
     }
   | { step: "error"; message: string };
 
@@ -234,6 +287,12 @@ async function buildTargets(admin: Admin): Promise<FieldTarget[]> {
  * the same reasoning as the other import pages, with the extra weight that a
  * stale plan here would write prices computed against a catalogue that has
  * since moved.
+ *
+ * Plans one window of `BATCH_PRODUCTS` products starting at `offset`. The file
+ * is parsed and grouped in full every time — it has to be, since only the whole
+ * file says which product a variant row belongs to — but everything after the
+ * grouping, the store reads included, is done for the window alone. That is
+ * what bounds a request's work no matter how long the file is.
  */
 async function buildPlan(
   admin: Admin,
@@ -242,10 +301,12 @@ async function buildPlan(
   locationId: string,
   targets: FieldTarget[],
   clearEmpty: boolean,
+  offset: number,
 ): Promise<
   | {
       ok: true;
       plan: ImportPlan;
+      batch: BatchInfo;
       resolved: ReturnType<typeof resolveHeaders>;
       columns: string[];
     }
@@ -296,6 +357,18 @@ async function buildPlan(
     };
   }
 
+  // --- The window ---------------------------------------------------------
+  const total = grouped.rows.length;
+  const start = Math.max(0, Math.min(offset, total));
+  const windowRows = grouped.rows.slice(start, start + BATCH_PRODUCTS);
+  const batch: BatchInfo = {
+    offset: start,
+    count: windowRows.length,
+    total,
+    nextOffset:
+      start + windowRows.length < total ? start + windowRows.length : null,
+  };
+
   // --- Read the store -----------------------------------------------------
   const productRefs: MetafieldRef[] = [];
   const variantRefs: MetafieldRef[] = [];
@@ -321,14 +394,14 @@ async function buildPlan(
   if (matchedBy === "handle") {
     products = await getProductsForUpdate(
       admin,
-      grouped.rows.map((row) => row.handle),
+      windowRows.map((row) => row.handle),
       productRefs,
       variantRefs,
     );
   } else if (matchedBy === "title") {
     const found = await getProductsForUpdateByTitle(
       admin,
-      grouped.rows.map((row) => row.title),
+      windowRows.map((row) => row.title),
       productRefs,
       variantRefs,
     );
@@ -338,7 +411,7 @@ async function buildPlan(
     // `row.key` is the lowercased SKU, which is how the lookup keys its map.
     const found = await getProductsForUpdateBySku(
       admin,
-      grouped.rows.map((row) => row.key),
+      windowRows.map((row) => row.key),
       productRefs,
       variantRefs,
     );
@@ -358,14 +431,14 @@ async function buildPlan(
 
   const metaobjects = await resolveMetaobjectRefs(
     admin,
-    grouped.rows,
+    windowRows,
     resolved,
     defaultTypeFor,
   );
-  const categories = await resolveCategories(admin, grouped.rows);
+  const categories = await resolveCategories(admin, windowRows);
   const referencedProducts = await resolveProductRefs(
     admin,
-    grouped.rows,
+    windowRows,
     resolved,
   );
 
@@ -388,11 +461,16 @@ async function buildPlan(
   return {
     ok: true,
     plan: planProductUpdate(
-      grouped.rows,
+      windowRows,
       resolved.byColumn,
       context,
-      grouped.errors,
+      // File-level problems are found by grouping the whole file, so every
+      // window would otherwise report the same ones and the review step would
+      // list each of them once per window. They belong to the file, so they
+      // are carried by the window that starts it.
+      start === 0 ? grouped.errors : [],
     ),
+    batch,
     resolved,
     columns,
   };
@@ -552,6 +630,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       String(formData.get(LOCATION_FIELD) ?? "") || locations[0]?.id || "";
     // An unchecked checkbox posts nothing at all, so presence is the answer.
     const clearEmpty = formData.get(CLEAR_EMPTY_FIELD) !== null;
+    // Which window of the file this request is for. Absent on the first one,
+    // and never trusted beyond being a non-negative number — `buildPlan` clamps
+    // it to the file it just grouped.
+    const offset = Math.max(0, Number(formData.get(OFFSET_FIELD) ?? 0) || 0);
 
     const report = (
       resolved: ReturnType<typeof resolveHeaders>,
@@ -596,6 +678,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       locationId,
       targets,
       clearEmpty,
+      offset,
     );
     if (!built.ok) return { step: "error", message: built.message } as const;
 
@@ -603,6 +686,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return {
         step: "plan",
         plan: built.plan,
+        batch: built.batch,
         ...report(built.resolved, built.columns),
       } as const;
     }
@@ -720,7 +804,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
-    return { step: "applied", updated, failures } as const;
+    return { step: "applied", updated, failures, batch: built.batch } as const;
   } catch (error) {
     return {
       step: "error",
@@ -729,22 +813,110 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 };
 
+/** A windowed run in progress, and what has come back from it so far. */
+type Run = {
+  /** "" for the review pass, "apply" for the writing one. */
+  intent: "" | "apply";
+  /** The window currently in flight. */
+  offset: number;
+  /** Products answered for so far. */
+  done: number;
+  /** Products in the file, once the first answer has said. */
+  total: number;
+};
+
+/** The review pass, stitched back together from its windows. */
+type PlanTotals = ImportPlan & { planned: number; total: number };
+
+/** The writing pass, likewise. */
+type ApplyTotals = {
+  updated: number;
+  failures: string[];
+  done: number;
+  total: number;
+};
+
+/**
+ * Products kept from the review pass.
+ *
+ * The table shows a hundred; a little more is held so the count under it is
+ * honest about there being more, without carrying a two-thousand-product diff
+ * around in the browser. The counts and `writeCount` are summed over every
+ * window regardless, so the summary and the button always speak for the whole
+ * file.
+ */
+const PLAN_ROWS_KEPT = 200;
+
+/** Failures kept from a writing run. The list on screen shows a hundred. */
+const FAILURES_KEPT = 500;
+
+/** Fold one window's plan into what the earlier windows already said. */
+function mergePlan(
+  prev: PlanTotals | null,
+  plan: ImportPlan,
+  batch: BatchInfo,
+): PlanTotals {
+  // Offset 0 is a fresh run, not a continuation — pressing "Review changes"
+  // again after editing the mapping must not add to the previous answer.
+  const base = batch.offset === 0 ? null : prev;
+  return {
+    products: [...(base?.products ?? []), ...plan.products].slice(
+      0,
+      PLAN_ROWS_KEPT,
+    ),
+    counts: {
+      update: (base?.counts.update ?? 0) + plan.counts.update,
+      unchanged: (base?.counts.unchanged ?? 0) + plan.counts.unchanged,
+      error: (base?.counts.error ?? 0) + plan.counts.error,
+    },
+    writeCount: (base?.writeCount ?? 0) + plan.writeCount,
+    errors: [...(base?.errors ?? []), ...plan.errors],
+    planned: batch.offset + batch.count,
+    total: batch.total,
+  };
+}
+
+/** The same, for the writing pass. */
+function mergeApplied(
+  prev: ApplyTotals | null,
+  answer: { updated: number; failures: string[]; batch: BatchInfo },
+): ApplyTotals {
+  const base = answer.batch.offset === 0 ? null : prev;
+  return {
+    updated: (base?.updated ?? 0) + answer.updated,
+    failures: [...(base?.failures ?? []), ...answer.failures].slice(
+      0,
+      FAILURES_KEPT,
+    ),
+    done: answer.batch.offset + answer.batch.count,
+    total: answer.batch.total,
+  };
+}
+
 export default function ProductUpdatePage() {
   const { exportFields, locations } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
   const data = fetcher.data;
-  const busy = fetcher.state !== "idle";
+
+  // A run is a sequence of requests, so "busy" cannot just be the fetcher's
+  // state: between two windows it is idle for a moment, and a button that
+  // un-greys there invites a second run over the top of the first.
+  const [run, setRun] = useState<Run | null>(null);
+  const [planTotals, setPlanTotals] = useState<PlanTotals | null>(null);
+  const [applyTotals, setApplyTotals] = useState<ApplyTotals | null>(null);
+  const busy = fetcher.state !== "idle" || run !== null;
+
+  // Held in state rather than read off the latest answer, because the mapping
+  // controls it renders are part of the form every window is read from. Taking
+  // it from `fetcher.data` unmounted the whole section the moment an "applied"
+  // answer arrived — so the second window of a writing run would have posted no
+  // mapping, no location and no "clear fields left empty", and the server would
+  // have re-guessed all three half way through the file.
+  const [report, setReport] = useState<ColumnReport | null>(null);
 
   // Four beats here rather than the usual three: this page reads the file's
   // columns and lets you correct the guesses before anything is planned.
-  const step: number =
-    data?.step === "applied"
-      ? 4
-      : data?.step === "plan"
-        ? 3
-        : data?.step === "inspect"
-          ? 2
-          : 1;
+  const step: number = applyTotals ? 4 : planTotals ? 3 : report ? 2 : 1;
 
   // Anything that stops a submit, said out loud. This page's failure mode used
   // to be silence: a click that validated wrong, or a request that came back
@@ -867,9 +1039,7 @@ export default function ProductUpdatePage() {
     }
   };
 
-  const report =
-    data && (data.step === "inspect" || data.step === "plan") ? data : null;
-  const plan = data?.step === "plan" ? data.plan : null;
+  const plan = planTotals;
 
   // Both buttons live in the same form — they have to, since the form holds
   // the file and the mapping — and `s-button` accepts no `name`/`value` of its
@@ -877,28 +1047,93 @@ export default function ProductUpdatePage() {
   // at the moment of submitting, which is the one place it cannot be stale.
   const formRef = useRef<HTMLFormElement>(null);
 
-  const submitWith = (intent: string) => () => {
-    const form = formRef.current;
-    if (!form) return;
-    // A programmatic submit skips the constraint validation a native one runs,
-    // and the CSV field is `required` — without this, forgetting to choose a
-    // file would round-trip to the server just to be told so.
-    //
-    // `readForm` rather than `reportValidity()` + `new FormData(form)`: the
-    // field is an `s-drop-zone`, and neither of those handles a form-associated
-    // custom element reliably. See `readForm` in components/ui/ImportFlow.
-    const formData = readForm(form);
-    if (!formData) {
-      setSubmitError("Choose a CSV file first.");
+  /**
+   * Post one window of the file.
+   *
+   * The whole form goes up every time, file included. Round-tripping a
+   * multi-megabyte CSV once per window is not free, but it is the only version
+   * of this that keeps the server stateless — no half-applied import parked in
+   * a session, nothing to expire between two windows, and a run that is
+   * abandoned half way leaves nothing behind but the products it already
+   * wrote, which re-running the same file brings into line anyway.
+   */
+  const postWindow = useCallback(
+    (intent: "" | "apply", offset: number) => {
+      const form = formRef.current;
+      if (!form) return false;
+      // A programmatic submit skips the constraint validation a native one
+      // runs, and the CSV field is `required` — without this, forgetting to
+      // choose a file would round-trip to the server just to be told so.
+      //
+      // `readForm` rather than `reportValidity()` + `new FormData(form)`: the
+      // field is an `s-drop-zone`, and neither of those handles a
+      // form-associated custom element reliably. See `readForm` in
+      // components/ui/ImportFlow.
+      const formData = readForm(form);
+      if (!formData) {
+        setSubmitError("Choose a CSV file first.");
+        return false;
+      }
+      setSubmitError(null);
+      if (intent) formData.set("intent", intent);
+      if (offset) formData.set(OFFSET_FIELD, String(offset));
+      fetcher.submit(formData, {
+        method: "post",
+        encType: "multipart/form-data",
+      });
+      return true;
+    },
+    [fetcher, setSubmitError],
+  );
+
+  /** Start a run at the top of the file, discarding what a previous one said. */
+  const submitWith = (intent: "" | "apply") => () => {
+    setApplyTotals(null);
+    if (intent !== "apply") setPlanTotals(null);
+    if (!postWindow(intent, 0)) return;
+    setRun({ intent, offset: 0, done: 0, total: 0 });
+  };
+
+  /**
+   * Carry a run on to its next window.
+   *
+   * Driven from the answer rather than from a timer or a counter on this side:
+   * the server says how far it got and where to resume, and this does as it is
+   * told until it is told `null`. A window that fails stops the run where it
+   * is — the error is on screen, and the products already written stay written.
+   */
+  const handled = useRef<ActionData | undefined>(undefined);
+  useEffect(() => {
+    if (fetcher.state !== "idle") return;
+    const answer = fetcher.data;
+    if (!answer || answer === handled.current) return;
+    handled.current = answer;
+
+    if (answer.step === "inspect" || answer.step === "plan") {
+      setReport(answer);
+    }
+
+    if (answer.step === "plan") {
+      setPlanTotals((prev) => mergePlan(prev, answer.plan, answer.batch));
+    } else if (answer.step === "applied") {
+      setApplyTotals((prev) => mergeApplied(prev, answer));
+    }
+
+    const batch =
+      answer.step === "plan" || answer.step === "applied" ? answer.batch : null;
+
+    if (!batch || batch.nextOffset === null || !run) {
+      setRun(null);
       return;
     }
-    setSubmitError(null);
-    if (intent) formData.set("intent", intent);
-    fetcher.submit(formData, {
-      method: "post",
-      encType: "multipart/form-data",
+    setRun({
+      intent: run.intent,
+      offset: batch.nextOffset,
+      done: batch.nextOffset,
+      total: batch.total,
     });
-  };
+    if (!postWindow(run.intent, batch.nextOffset)) setRun(null);
+  }, [fetcher.state, fetcher.data, run, postWindow]);
 
   // Enter in a field still submits natively; treat that as "review", which is
   // the non-destructive step.
@@ -1120,6 +1355,17 @@ export default function ProductUpdatePage() {
                 </s-paragraph>
 
                 <s-paragraph>
+                  A whole catalogue can go in one file — up to{" "}
+                  {MAX_PRODUCTS.toLocaleString()} products and{" "}
+                  {MAX_ROWS.toLocaleString()} rows. Long files are reviewed and
+                  written in batches of {BATCH_PRODUCTS}, one after another,
+                  with the progress shown as it goes;{" "}
+                  <strong>leave this page open</strong> until it finishes. If it
+                  stops part way, everything before that point is already
+                  written and re-running the same file finishes the rest.
+                </s-paragraph>
+
+                <s-paragraph>
                   A Shopify product export needs no setup — its columns are
                   recognised automatically, and so are the everyday spellings a
                   hand-made sheet uses (<s-text>Price</s-text>,{" "}
@@ -1333,6 +1579,35 @@ export default function ProductUpdatePage() {
                   bottom.
                 </s-paragraph>
               </s-banner>
+
+              {/* A long file is reviewed a window at a time, and the numbers
+                  below grow as the windows land. Saying so is the difference
+                  between "still working" and a summary that looks final while
+                  it is still half the story. */}
+              {run?.intent === "" && (
+                <s-banner tone="info">
+                  <s-paragraph>
+                    Reviewing… {plan.planned} of {plan.total} products so far.
+                    The counts below are still growing.
+                  </s-paragraph>
+                </s-banner>
+              )}
+
+              {/* Stopped short — an error window ended the run. The counts
+                  describe part of the file, so they are not something to act
+                  on, and the button below stays disabled until the review is
+                  run again. */}
+              {run === null && plan.planned < plan.total && (
+                <s-banner tone="warning">
+                  <s-paragraph>
+                    The review stopped after {plan.planned} of {plan.total}{" "}
+                    products, so these counts cover only that much of the file.
+                    Press <s-text type="strong">Review changes</s-text> again to
+                    start over.
+                  </s-paragraph>
+                </s-banner>
+              )}
+
               <s-stack direction="inline" gap="small-300">
                 <s-badge tone="info">{plan.counts.update} to update</s-badge>
                 <s-badge tone="neutral">
@@ -1429,20 +1704,30 @@ export default function ProductUpdatePage() {
                 </s-table>
               </TableScroll>
 
-              {plan.products.length > 100 && (
+              {plan.total > 100 && (
                 <s-paragraph>
-                  Showing the first 100 of {plan.products.length} products. All
-                  of them will be updated.
+                  Showing the first 100 of {plan.total} products. All of them
+                  will be updated.
                 </s-paragraph>
               )}
 
               <Actions>
+                {/* Disabled until the review has covered the whole file —
+                    while it is still running, and also if it stopped short.
+                    A part-reviewed file has a `writeCount` that is only the
+                    part of the answer that arrived, and a button offering to
+                    update forty products when the file holds four hundred
+                    would be lying about what it is about to do. */}
                 <s-button
                   type="button"
                   variant="primary"
                   onClick={submitWith("apply")}
                   {...(busy ? { loading: true } : {})}
-                  {...(plan.writeCount === 0 ? { disabled: true } : {})}
+                  {...(plan.writeCount === 0 ||
+                  run !== null ||
+                  plan.planned < plan.total
+                    ? { disabled: true }
+                    : {})}
                 >
                   Update {plan.writeCount} product(s)
                 </s-button>
@@ -1453,28 +1738,71 @@ export default function ProductUpdatePage() {
       </fetcher.Form>
 
       {data?.step === "error" && (
-        <s-section heading="Could not read that file">
-          <s-banner tone="critical">
-            <s-paragraph>{data.message}</s-paragraph>
-          </s-banner>
+        <s-section
+          heading={
+            // A run that fails part way through is not a file that could not
+            // be read, and saying so would send someone off to check a file
+            // that is fine.
+            planTotals || applyTotals
+              ? "The run stopped part way"
+              : "Could not read that file"
+          }
+        >
+          <s-stack direction="block" gap="base">
+            <s-banner tone="critical">
+              <s-paragraph>{data.message}</s-paragraph>
+            </s-banner>
+            {applyTotals && (
+              <s-paragraph color="subdued">
+                The {applyTotals.done} products before this point were written
+                and are unaffected. Running the same file again picks up what is
+                left: a value that already matches is never written twice.
+              </s-paragraph>
+            )}
+          </s-stack>
         </s-section>
       )}
 
-      {data?.step === "applied" && (
-        <s-section heading="Update finished">
+      {applyTotals && (
+        <s-section
+          heading={run?.intent === "apply" ? "Updating…" : "Update finished"}
+        >
           <s-stack direction="block" gap="base">
             <Steps current={4} />
-            <s-banner tone={data.failures.length ? "warning" : "success"}>
+
+            {/* Live while the run is still going: the writing pass is windowed
+                too, and a merchant watching a four-hundred-product file needs
+                to see it move. Leaving the page here stops the run — what was
+                written stays written, and re-running the file finishes it. */}
+            {run?.intent === "apply" && (
+              <s-banner tone="info">
+                <s-paragraph>
+                  {applyTotals.done} of {applyTotals.total} products done. Keep
+                  this page open until it finishes.
+                </s-paragraph>
+              </s-banner>
+            )}
+
+            <s-banner
+              tone={
+                run?.intent === "apply"
+                  ? "info"
+                  : applyTotals.failures.length
+                    ? "warning"
+                    : "success"
+              }
+            >
               <s-paragraph>
-                {data.updated} product(s) updated, {data.failures.length}{" "}
-                problem(s). Nothing was deleted or recreated — every product
-                kept its metafields, media and collections.
+                {applyTotals.updated} product(s) updated,{" "}
+                {applyTotals.failures.length} problem(s). Nothing was deleted or
+                recreated — every product kept its metafields, media and
+                collections.
               </s-paragraph>
             </s-banner>
 
-            {data.failures.length > 0 && (
+            {applyTotals.failures.length > 0 && (
               <s-unordered-list>
-                {data.failures.slice(0, 100).map((failure, index) => (
+                {applyTotals.failures.slice(0, 100).map((failure, index) => (
                   <s-list-item key={`${failure}-${index}`}>
                     {failure}
                   </s-list-item>
