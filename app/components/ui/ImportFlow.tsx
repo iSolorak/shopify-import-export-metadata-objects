@@ -150,6 +150,41 @@ export function CsvDropZone({
 }
 
 /**
+ * A collapsed group of form fields.
+ *
+ * Built on `<details>` rather than conditional rendering, and that is the whole
+ * point: unmounting a group of `<s-select>`s would drop them from the form, and
+ * a mapping the server then reads as "don't import" — silently discarding the
+ * columns the page had just finished matching for you. The children of a closed
+ * `<details>` stay in the DOM and still submit (verified against the Polaris
+ * runtime, `s-select` included), so hiding is purely visual.
+ */
+export function Disclosure({
+  summary,
+  children,
+  defaultOpen = false,
+}: {
+  summary: string;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
+  return (
+    <details
+      className={styles.disclosure}
+      {...(defaultOpen ? { open: true } : {})}
+    >
+      <summary className={styles.disclosureSummary}>
+        <span>{summary}</span>
+        <span className={styles.disclosureHint} aria-hidden="true">
+          Show / hide
+        </span>
+      </summary>
+      <div className={styles.disclosureBody}>{children}</div>
+    </details>
+  );
+}
+
+/**
  * Warn when a submit finishes having rendered nothing.
  *
  * React Router gives a fetcher no `data` when the action never returned one —

@@ -57,6 +57,7 @@ import { Guide } from "../components/ui/Guide";
 import {
   Actions,
   CsvDropZone,
+  Disclosure,
   readForm,
   useSubmitFeedback,
   Steps,
@@ -906,6 +907,21 @@ export default function ProductUpdatePage() {
     submitWith("")();
   };
 
+  // A column is settled when the recogniser already found it a home; the rest
+  // are the only ones a person actually has to answer for. `ignored` columns
+  // are read and deliberately not written, so they are listed above rather
+  // than given a dropdown that would imply a choice exists.
+  const ignoredColumns = new Set(
+    (report?.ignored ?? []).map((entry) => entry.column),
+  );
+  const mappableColumns = (report?.columns ?? []).filter(
+    (column) => !ignoredColumns.has(column),
+  );
+  const settled = mappableColumns.filter((column) => report?.mapping[column]);
+  const needsAttention = mappableColumns.filter(
+    (column) => !report?.mapping[column],
+  );
+
   // Targets grouped for the dropdown, so a forty-column file is browsable.
   const groups = new Map<string, { field: string; label: string }[]>();
   for (const target of report?.targets ?? []) {
@@ -913,6 +929,56 @@ export default function ProductUpdatePage() {
     list.push(target);
     groups.set(target.group, list);
   }
+
+  // One row builder, two tables. Both render real `<s-select name="map:…">`
+  // controls, so whichever table a column lands in it posts the same field.
+  const mappingTable = (columns: string[]) => (
+    <s-table>
+      <s-table-header-row>
+        <s-table-header>Column in your file</s-table-header>
+        <s-table-header>Goes to</s-table-header>
+      </s-table-header-row>
+      <s-table-body>
+        {columns.map((column) => (
+          <s-table-row key={column}>
+            <s-table-cell>{column}</s-table-cell>
+            <s-table-cell>
+              <s-select
+                name={`${MAPPING_PREFIX}${column}`}
+                label=""
+                labelAccessibilityVisibility="exclusive"
+              >
+                {/* The selection lives on the option rather than the select:
+                    `s-select` omits `defaultValue`, and a controlled `value`
+                    would fight the user's edits between submits. */}
+                <s-option
+                  value=""
+                  {...(report?.mapping[column]
+                    ? {}
+                    : { defaultSelected: true })}
+                >
+                  Don&rsquo;t import
+                </s-option>
+                {[...groups.entries()].map(([group, items]) =>
+                  items.map((target) => (
+                    <s-option
+                      key={target.field}
+                      value={target.field}
+                      {...(report?.mapping[column] === target.field
+                        ? { defaultSelected: true }
+                        : {})}
+                    >
+                      {group} — {target.label}
+                    </s-option>
+                  )),
+                )}
+              </s-select>
+            </s-table-cell>
+          </s-table-row>
+        ))}
+      </s-table-body>
+    </s-table>
+  );
 
   return (
     <s-page heading="Update products from CSV">
@@ -1126,6 +1192,40 @@ export default function ProductUpdatePage() {
                 )}
               </s-stack>
 
+              {/* The same action as the one at the foot of the section, put
+                  where it can be reached without reading the section first.
+                  When the recogniser has matched everything there is nothing
+                  below this worth scrolling through, and the honest next step
+                  is simply "carry on". */}
+              <Actions>
+                <s-button
+                  type="button"
+                  variant="primary"
+                  icon="import"
+                  onClick={submitWith("")}
+                  {...(busy ? { loading: true } : {})}
+                >
+                  Review changes
+                </s-button>
+              </Actions>
+
+              {needsAttention.length === 0 ? (
+                <s-paragraph color="subdued">
+                  Every column was recognised, so there is nothing to match by
+                  hand. Press <s-text type="strong">Review changes</s-text> to
+                  see what the file would do.
+                </s-paragraph>
+              ) : (
+                <s-paragraph color="subdued">
+                  {needsAttention.length} column
+                  {needsAttention.length === 1 ? " was" : "s were"} not
+                  recognised. You can set{" "}
+                  {needsAttention.length === 1 ? "it" : "them"} below, or carry
+                  on and leave {needsAttention.length === 1 ? "it" : "them"}{" "}
+                  out.
+                </s-paragraph>
+              )}
+
               {report.ignored.length > 0 && (
                 <s-stack direction="block" gap="small-300">
                   <s-paragraph>Read and deliberately not written:</s-paragraph>
@@ -1169,60 +1269,48 @@ export default function ProductUpdatePage() {
                 </s-select>
               )}
 
-              {/* A wide mapping table would otherwise push the whole embedded
-                  page sideways on a narrow screen. */}
-              <TableScroll>
-                <s-table>
-                  <s-table-header-row>
-                    <s-table-header>Column in your file</s-table-header>
-                    <s-table-header>Goes to</s-table-header>
-                  </s-table-header-row>
-                  <s-table-body>
-                    {report.columns.map((column) => (
-                      <s-table-row key={column}>
-                        <s-table-cell>{column}</s-table-cell>
-                        <s-table-cell>
-                          <s-select
-                            name={`${MAPPING_PREFIX}${column}`}
-                            label=""
-                            labelAccessibilityVisibility="exclusive"
-                          >
-                            {/* The selection lives on the option rather than
-                                the select: `s-select` omits `defaultValue`,
-                                and a controlled `value` would fight the
-                                user's edits between submits. */}
-                            <s-option
-                              value=""
-                              {...(report.mapping[column]
-                                ? {}
-                                : { defaultSelected: true })}
-                            >
-                              Don&rsquo;t import
-                            </s-option>
-                            {[...groups.entries()].map(([group, items]) =>
-                              items.map((target) => (
-                                <s-option
-                                  key={target.field}
-                                  value={target.field}
-                                  {...(report.mapping[column] === target.field
-                                    ? { defaultSelected: true }
-                                    : {})}
-                                >
-                                  {group} — {target.label}
-                                </s-option>
-                              )),
-                            )}
-                          </s-select>
-                        </s-table-cell>
-                      </s-table-row>
-                    ))}
-                  </s-table-body>
-                </s-table>
-              </TableScroll>
+              {/* Two tables, not one.
 
+                  A Shopify product export is sixty-odd columns, and this page
+                  used to list every one of them above the only button that
+                  moves you forward — so continuing meant scrolling past forty
+                  dropdowns you had no intention of touching, and it read as if
+                  each one wanted a decision.
+
+                  Almost none of them do: the recogniser has already matched
+                  them, and the answer is simply "yes". So the ones that need a
+                  choice are shown, and the ones already settled are folded
+                  away behind a summary. They are still in the form and still
+                  submit — see `Disclosure` for why that has to be a
+                  `<details>` rather than a conditional render. */}
+              {needsAttention.length > 0 && (
+                <s-stack direction="block" gap="small-200">
+                  <s-heading>Columns that need a decision</s-heading>
+                  <s-paragraph color="subdued">
+                    These were not recognised. Point each one at a field, or
+                    leave it as &ldquo;Don&rsquo;t import&rdquo; — leaving it
+                    out changes nothing in the store.
+                  </s-paragraph>
+                  <TableScroll>{mappingTable(needsAttention)}</TableScroll>
+                </s-stack>
+              )}
+
+              {settled.length > 0 && (
+                <Disclosure
+                  summary={`${settled.length} column${settled.length === 1 ? "" : "s"} already matched`}
+                >
+                  <TableScroll>{mappingTable(settled)}</TableScroll>
+                </Disclosure>
+              )}
+
+              {/* Repeated at the foot for anyone who did come down here to
+                  change something — having to scroll back up to act on an
+                  edit you just made is the same complaint in reverse. */}
               <Actions>
                 <s-button
                   type="button"
+                  variant="primary"
+                  icon="import"
                   onClick={submitWith("")}
                   {...(busy ? { loading: true } : {})}
                 >

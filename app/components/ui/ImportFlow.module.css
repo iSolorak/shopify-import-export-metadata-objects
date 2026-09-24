@@ -104,3 +104,50 @@
       right center / 0.75rem 100% no-repeat;
   background-attachment: local, local, scroll, scroll;
 }
+
+/* Collapsed group of form fields. See `Disclosure` in ImportFlow.tsx — the
+   fields inside stay in the DOM when closed, so this is presentation only. */
+.disclosure {
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-200);
+  font-family: var(--font-sans);
+}
+
+.disclosureSummary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-200);
+  padding: var(--sp-150) var(--sp-300);
+  font-size: var(--font-size-body-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-body-md);
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  border-radius: var(--radius-200);
+}
+
+.disclosureSummary::-webkit-details-marker {
+  display: none;
+}
+
+.disclosureSummary:hover {
+  background: var(--color-bg-surface-hover);
+}
+
+.disclosureSummary:focus-visible {
+  outline: 0.125rem solid var(--color-focused);
+  outline-offset: -0.125rem;
+}
+
+.disclosureHint {
+  margin-left: auto;
+  font-weight: var(--font-weight-regular);
+  font-size: var(--font-size-body-sm);
+  color: var(--color-text-secondary);
+}
+
+.disclosureBody {
+  padding: 0 var(--sp-300) var(--sp-300);
+}
