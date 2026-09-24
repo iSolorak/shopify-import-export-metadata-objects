@@ -1,3 +1,5 @@
+import { Link } from "react-router";
+
 import styles from "./TaskGrid.module.css";
 
 /**
@@ -44,10 +46,23 @@ export function TaskGrid({ tasks }: { tasks: Task[] }) {
   return (
     <div className={styles.grid}>
       {tasks.map((task) => (
-        <a
+        // `Link`, never a plain `<a href>`.
+        //
+        // This app is embedded: it renders inside an iframe in the Shopify
+        // admin, and the URL the iframe was handed carries the `host`,
+        // `shop` and `embedded` parameters App Bridge authenticates with. A
+        // raw anchor is a full document navigation — the browser drops the
+        // query string and re-requests the bare path, which arrives with no
+        // session and so never reaches the page you clicked.
+        //
+        // `Link` routes on the client instead. No document load, the iframe
+        // keeps its parameters, and the route's loader runs over the existing
+        // authenticated session. The nav in `app.tsx` gets away with `s-link`
+        // only because App Bridge intercepts those itself.
+        <Link
           key={task.href}
           className={styles.card}
-          href={task.href}
+          to={task.href}
           data-empty={task.empty ? "" : undefined}
         >
           <span className={styles.icon} aria-hidden="true">
@@ -61,7 +76,7 @@ export function TaskGrid({ tasks }: { tasks: Task[] }) {
           <span className={styles.chevron} aria-hidden="true">
             <s-icon type="chevron-right" size="small" />
           </span>
-        </a>
+        </Link>
       ))}
     </div>
   );
