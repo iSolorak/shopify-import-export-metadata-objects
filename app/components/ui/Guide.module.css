@@ -1,0 +1,77 @@
+/* Disclosure panel for the explanatory text above a form. See Guide.tsx.
+   Every measurement is a token from app/styles/tokens.css. */
+
+.guide {
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-200);
+  background: var(--color-bg-surface-secondary);
+  font-family: var(--font-sans);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-200);
+  /* 10px/12px — the Polaris row rhythm for a compact header: one step below
+     card padding so the closed guide reads as a strip, not a second card. */
+  padding: var(--sp-150) var(--sp-300);
+  font-size: var(--font-size-body-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-body-md);
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  border-radius: var(--radius-200);
+}
+
+/* Safari draws its own triangle outside the flex row, which knocks the icon
+   and label out of alignment. */
+.summary::-webkit-details-marker {
+  display: none;
+}
+
+.summary:hover {
+  background: var(--color-bg-surface-hover);
+}
+
+.summary:focus-visible {
+  outline: 0.125rem solid var(--color-focused);
+  outline-offset: -0.125rem;
+}
+
+/* "Hide"/"Show" rather than a chevron: the affordance is the point, and at this
+   size a rotating caret is easy to miss. `aria-hidden` on it in the component —
+   <details> already announces its own expanded state. */
+.hint {
+  margin-left: auto;
+  font-weight: var(--font-weight-regular);
+  font-size: var(--font-size-body-sm);
+  color: var(--color-text-secondary);
+}
+
+.title {
+  min-width: 0;
+}
+
+.body {
+  /* No padding-block-start: the summary's own padding already separates them,
+     and doubling it opens a gap wider than the text block it introduces. */
+  padding: 0 var(--sp-300) var(--sp-300);
+  font-size: var(--font-size-body-md);
+  line-height: var(--line-height-body-md);
+  color: var(--color-text-secondary);
+}
+
+/* Polaris paragraphs inside the body carry their own block margin; this is the
+   gap between them and the summary row above. */
+.body > :first-child {
+  margin-block-start: 0;
+}
+
+/* A caution guide is the same panel with a warning's left edge, so it reads as
+   "read this" without the full weight of a critical banner — which would claim
+   something is wrong when nothing has happened yet. */
+.caution {
+  border-inline-start: 0.1875rem solid var(--p-color-border-caution, #ffb800);
+}

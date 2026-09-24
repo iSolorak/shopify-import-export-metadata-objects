@@ -3,10 +3,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 
 import { authenticate } from "../shopify.server";
-import {
-  createDefinition,
-  listDefinitions,
-} from "../lib/metaobjects.server";
+import { createDefinition, listDefinitions } from "../lib/metaobjects.server";
 import {
   createMetafieldDefinition,
   listMetafieldDefinitions,
@@ -23,7 +20,8 @@ import {
   suggestReferenceMetafields,
   type DefinitionDraft,
 } from "../lib/metaobject-fields";
-import styles from "./app._index/styles.module.css";
+import { Guide } from "../components/ui/Guide";
+import { Actions, CsvDropZone, TableScroll } from "../components/ui/ImportFlow";
 
 // Create metaobject definitions — the schema — one field at a time.
 //
@@ -228,7 +226,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const plan = planDefinitionForm(draft, { maxFields: MAX_FIELDS });
     if (!plan.ok) {
-      return { step: "error", message: plan.message, errors: plan.errors } as const;
+      return {
+        step: "error",
+        message: plan.message,
+        errors: plan.errors,
+      } as const;
     }
 
     const result = await createDefinition(admin, plan.definition);
@@ -316,7 +318,7 @@ export default function MetaobjectFieldsPage() {
               {definitions.length} definition(s) already exist. Creating one
               that is already here reports an error rather than overwriting it.
             </s-paragraph>
-            <div className={styles.tableScroll}>
+            <TableScroll>
               <s-table>
                 <s-table-header-row>
                   <s-table-header>Name</s-table-header>
@@ -350,7 +352,7 @@ export default function MetaobjectFieldsPage() {
                   ))}
                 </s-table-body>
               </s-table>
-            </div>
+            </TableScroll>
           </s-stack>
         )}
       </s-section>
@@ -359,39 +361,42 @@ export default function MetaobjectFieldsPage() {
         <fetcher.Form method="post" encType="multipart/form-data">
           <input type="hidden" name="intent" value="metafields" />
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Upload <s-text>product-metafield-definitions.csv</s-text> from the
-              Oscar export. It creates the definitions — short description,
-              usage, ingredients, warnings — as pinned rich text fields, so they
-              appear in the <strong>Product metafields</strong> card on every
-              product.
-            </s-paragraph>
-            <s-paragraph>
-              A row with a <s-text>metaobject_type</s-text> column — the claims
-              link is one — points the metafield at that metaobject definition,
-              so its entries have to exist first. Import them above before this
-              file, or the row is reported as a failure rather than created
-              pointing at nothing.
-            </s-paragraph>
-            <s-paragraph>
-              Then import <s-text>product-metafields.csv</s-text> on the{" "}
-              <s-link href="/app/product-update">Update products</s-link> page to
-              fill them in. The columns are already named the way that importer
-              expects, so there is nothing to map.
-            </s-paragraph>
+            <Guide
+              id="metaobject-fields-metafields"
+              title="What this file creates, and what has to exist first"
+              tone="caution"
+            >
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  Upload <s-text>product-metafield-definitions.csv</s-text> from
+                  the Oscar export. It creates the definitions — short
+                  description, usage, ingredients, warnings — as pinned rich
+                  text fields, so they appear in the{" "}
+                  <strong>Product metafields</strong> card on every product.
+                </s-paragraph>
+                <s-paragraph>
+                  A row with a <s-text>metaobject_type</s-text> column — the
+                  claims link is one — points the metafield at that metaobject
+                  definition, so its entries have to exist first. Import them
+                  above before this file, or the row is reported as a failure
+                  rather than created pointing at nothing.
+                </s-paragraph>
+                <s-paragraph>
+                  Then import <s-text>product-metafields.csv</s-text> on the{" "}
+                  <s-link href="/app/product-update">Update products</s-link>{" "}
+                  page to fill them in. The columns are already named the way
+                  that importer expects, so there is nothing to map.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>Definitions CSV</span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="file"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+            <CsvDropZone
+              name="file"
+              label="Definitions CSV"
+              accept=".csv,text/csv"
+            />
 
-            <div className={styles.actions}>
+            <Actions>
               <s-button
                 type="submit"
                 variant="primary"
@@ -399,7 +404,7 @@ export default function MetaobjectFieldsPage() {
               >
                 Create metafields
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         </fetcher.Form>
       </s-section>
@@ -416,8 +421,8 @@ export default function MetaobjectFieldsPage() {
             <s-stack direction="block" gap="base">
               <s-paragraph>
                 A metaobject definition does not appear on a product by itself.
-                What puts it in the <strong>Product metafields</strong> card is a
-                metafield that references it — pinned, so the admin shows it.
+                What puts it in the <strong>Product metafields</strong> card is
+                a metafield that references it — pinned, so the admin shows it.
                 Entries are then chosen per product, and the importer fills them
                 in by handle.
               </s-paragraph>
@@ -429,7 +434,7 @@ export default function MetaobjectFieldsPage() {
                 details="Groups the metafields together. Shopify's own convention for merchant-owned data is “custom”."
               />
 
-              <div className={styles.tableScroll}>
+              <TableScroll>
                 <s-table>
                   <s-table-header-row>
                     <s-table-header>Link</s-table-header>
@@ -452,7 +457,8 @@ export default function MetaobjectFieldsPage() {
                         </s-table-cell>
                         <s-table-cell>{reference.metaobjectType}</s-table-cell>
                         <s-table-cell>
-                          {reference.existing ?? `${reference.namespace}.${reference.key}`}
+                          {reference.existing ??
+                            `${reference.namespace}.${reference.key}`}
                         </s-table-cell>
                         <s-table-cell>
                           {/* Claims are many per product; usage or ingredients
@@ -477,9 +483,9 @@ export default function MetaobjectFieldsPage() {
                     ))}
                   </s-table-body>
                 </s-table>
-              </div>
+              </TableScroll>
 
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="submit"
                   variant="primary"
@@ -487,7 +493,7 @@ export default function MetaobjectFieldsPage() {
                 >
                   Create metafields
                 </s-button>
-              </div>
+              </Actions>
             </s-stack>
           </fetcher.Form>
         )}
@@ -497,9 +503,9 @@ export default function MetaobjectFieldsPage() {
         <fetcher.Form method="post">
           <s-stack direction="block" gap="base">
             <s-paragraph>
-              A metaobject is a reusable record with fields of its own — a
-              claim badge, a size chart, an ingredient. To add a single value to
-              a product instead, use a metafield.
+              A metaobject is a reusable record with fields of its own — a claim
+              badge, a size chart, an ingredient. To add a single value to a
+              product instead, use a metafield.
             </s-paragraph>
 
             <s-text-field
@@ -523,11 +529,9 @@ export default function MetaobjectFieldsPage() {
             />
 
             <s-heading>Fields</s-heading>
-            <s-paragraph>
-              Up to {MAX_FIELDS} per definition.
-            </s-paragraph>
+            <s-paragraph>Up to {MAX_FIELDS} per definition.</s-paragraph>
 
-            <div className={styles.tableScroll}>
+            <TableScroll>
               <s-table>
                 <s-table-header-row>
                   <s-table-header>Name</s-table-header>
@@ -554,7 +558,8 @@ export default function MetaobjectFieldsPage() {
                             // them typing the same word twice.
                             update(index, {
                               name,
-                              ...(row.key === "" || row.key === suggestKey(row.name)
+                              ...(row.key === "" ||
+                              row.key === suggestKey(row.name)
                                 ? { key: suggestKey(name) }
                                 : {}),
                             });
@@ -588,7 +593,10 @@ export default function MetaobjectFieldsPage() {
                           }
                         >
                           {FIELD_TYPE_GROUPS.map((group) => (
-                            <s-option-group key={group.label} label={group.label}>
+                            <s-option-group
+                              key={group.label}
+                              label={group.label}
+                            >
                               {group.types.map((type) => (
                                 <s-option key={type.value} value={type.value}>
                                   {type.label}
@@ -625,16 +633,16 @@ export default function MetaobjectFieldsPage() {
                   ))}
                 </s-table-body>
               </s-table>
-            </div>
+            </TableScroll>
 
-            <div className={styles.actions}>
+            <Actions>
               <s-button
                 onClick={addRow}
                 {...(rows.length >= MAX_FIELDS ? { disabled: true } : {})}
               >
                 Add field
               </s-button>
-            </div>
+            </Actions>
 
             <s-select
               label="Display name field"
@@ -649,7 +657,7 @@ export default function MetaobjectFieldsPage() {
               ))}
             </s-select>
 
-            <div className={styles.actions}>
+            <Actions>
               <s-button
                 type="submit"
                 variant="primary"
@@ -657,7 +665,7 @@ export default function MetaobjectFieldsPage() {
               >
                 Create definition
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         </fetcher.Form>
       </s-section>

@@ -19,7 +19,13 @@ import {
 } from "../lib/rich-text-csv";
 import { SUPPORTED_TAGS } from "../lib/rich-text";
 import { downloadCsv } from "../lib/download-csv";
-import styles from "./app._index/styles.module.css";
+import { Guide } from "../components/ui/Guide";
+import {
+  Actions,
+  CsvDropZone,
+  Steps,
+  TableScroll,
+} from "../components/ui/ImportFlow";
 
 // Import and export product rich text metafields as HTML.
 //
@@ -209,11 +215,19 @@ export default function RichTextPage() {
   const { definitions } = useLoaderData<typeof loader>();
   const fetcher = useFetcher<ActionData>();
 
-  const [exporting, setExporting] = useState<"values" | "template" | null>(null);
+  const [exporting, setExporting] = useState<"values" | "template" | null>(
+    null,
+  );
   const [exportError, setExportError] = useState<string | null>(null);
 
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
+
+  // Derived from the response rather than kept in state, so back-navigation
+  // and a re-submitted form cannot leave the indicator out of step with the
+  // page. See `Steps` in components/ui/ImportFlow.
+  const step: 1 | 2 | 3 =
+    data?.step === "applied" ? 3 : data?.step === "plan" ? 2 : 1;
 
   const runExport = async (kind: "values" | "template") => {
     setExporting(kind);
@@ -265,7 +279,7 @@ export default function RichTextPage() {
             </s-banner>
           )}
 
-          <div className={styles.actions}>
+          <Actions>
             <s-button
               variant="primary"
               onClick={() => runExport("values")}
@@ -281,7 +295,7 @@ export default function RichTextPage() {
             >
               Download empty template
             </s-button>
-          </div>
+          </Actions>
         </s-stack>
       </s-section>
 
@@ -289,46 +303,48 @@ export default function RichTextPage() {
         <fetcher.Form method="post" encType="multipart/form-data">
           <input type="hidden" name="intent" value="plan" />
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              The file needs a <s-text>{TITLE_COLUMN}</s-text> column holding
-              the product title, plus one column per metafield named{" "}
-              <s-text>namespace.key</s-text>. Cells hold HTML —{" "}
-              <s-text>{SUPPORTED_TAGS}</s-text> are converted to Shopify&rsquo;s
-              rich text format. Anything else is kept as plain text.
-            </s-paragraph>
+            <Steps current={step} />
 
-            <s-paragraph>
-              A CSV exported from <strong>Products → Export</strong> in the
-              admin also works as-is — its{" "}
-              <s-text>Title</s-text> and{" "}
-              <s-text>… (product.metafields.namespace.key)</s-text> columns are
-              recognised, and its per-variant rows are collapsed to one row per
-              product.
-            </s-paragraph>
+            <Guide id="rich-text-import" title="What your file needs">
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  The file needs a <s-text type="strong">{TITLE_COLUMN}</s-text>{" "}
+                  column holding the product title, plus one column per
+                  metafield named <s-text type="strong">namespace.key</s-text>.
+                  Cells hold HTML —{" "}
+                  <s-text type="strong">{SUPPORTED_TAGS}</s-text> are converted
+                  to Shopify&rsquo;s rich text format. Anything else is kept as
+                  plain text.
+                </s-paragraph>
 
-            <s-paragraph>
-              An <strong>empty cell is left alone</strong>, not cleared, so you
-              can fill in one column without disturbing the others. Two products
-              sharing a title need a <s-text>handle</s-text> column to tell them
-              apart.
-            </s-paragraph>
+                <s-paragraph>
+                  A CSV exported from <strong>Products → Export</strong> in the
+                  admin also works as-is — its{" "}
+                  <s-text type="strong">Title</s-text> and{" "}
+                  <s-text type="strong">
+                    … (product.metafields.namespace.key)
+                  </s-text>{" "}
+                  columns are recognised, and its per-variant rows are collapsed
+                  to one row per product.
+                </s-paragraph>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>CSV file</span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="file"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+                <s-paragraph>
+                  An <strong>empty cell is left alone</strong>, not cleared, so
+                  you can fill in one column without disturbing the others. Two
+                  products sharing a title need a{" "}
+                  <s-text type="strong">handle</s-text> column to tell them
+                  apart.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
 
-            <div className={styles.actions}>
+            <CsvDropZone name="file" label="CSV file" accept=".csv,text/csv" />
+
+            <Actions>
               <s-button type="submit" {...(busy ? { loading: true } : {})}>
                 Review changes
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         </fetcher.Form>
       </s-section>
@@ -342,8 +358,16 @@ export default function RichTextPage() {
       )}
 
       {data?.step === "plan" && (
-        <s-section heading="Review — nothing has been written yet">
+        <s-section heading="Review">
           <s-stack direction="block" gap="base">
+            <Steps current={2} />
+
+            <s-banner tone="info">
+              <s-paragraph>
+                Nothing has been written yet. This is what the file would do —
+                the store changes only when you press the button at the bottom.
+              </s-paragraph>
+            </s-banner>
             {data.note && (
               <s-banner tone="info">
                 <s-paragraph>{data.note}</s-paragraph>
@@ -355,9 +379,7 @@ export default function RichTextPage() {
               <s-badge tone="neutral">
                 {data.plan.counts.unchanged} unchanged
               </s-badge>
-              <s-badge tone="neutral">
-                {data.plan.counts.skipped} empty
-              </s-badge>
+              <s-badge tone="neutral">{data.plan.counts.skipped} empty</s-badge>
               {data.plan.counts.error > 0 && (
                 <s-badge tone="critical">
                   {data.plan.counts.error} with errors
@@ -376,7 +398,7 @@ export default function RichTextPage() {
 
             {/* A wide plan table would otherwise push the whole embedded page
                 sideways on a narrow screen. */}
-            <div className={styles.tableScroll}>
+            <TableScroll>
               <s-table>
                 <s-table-header-row>
                   <s-table-header>Row</s-table-header>
@@ -412,7 +434,7 @@ export default function RichTextPage() {
                   ))}
                 </s-table-body>
               </s-table>
-            </div>
+            </TableScroll>
 
             {data.plan.rows.length > 100 && (
               <s-paragraph>
@@ -424,7 +446,7 @@ export default function RichTextPage() {
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="apply" />
               <input type="hidden" name="csv" value={data.csv} />
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="submit"
                   variant="primary"
@@ -433,7 +455,7 @@ export default function RichTextPage() {
                 >
                   Write {data.plan.writeCount} field(s)
                 </s-button>
-              </div>
+              </Actions>
             </fetcher.Form>
           </s-stack>
         </s-section>
@@ -442,6 +464,7 @@ export default function RichTextPage() {
       {data?.step === "applied" && (
         <s-section heading="Import finished">
           <s-stack direction="block" gap="base">
+            <Steps current={3} />
             <s-banner tone={data.failures.length ? "warning" : "success"}>
               <s-paragraph>
                 {data.updated} field(s) written, {data.failures.length} failed.

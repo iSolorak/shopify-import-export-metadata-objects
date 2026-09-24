@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 
@@ -28,7 +28,15 @@ import {
 } from "../../lib/files.server";
 import { downloadCsv } from "../../lib/download-csv";
 import type { Definition } from "../../lib/metaobjects.server";
-import styles from "./styles.module.css";
+import { Guide } from "../../components/ui/Guide";
+import {
+  Actions,
+  CsvDropZone,
+  PlanSummary,
+  Steps,
+  TableScroll,
+  TruncationNote,
+} from "../../components/ui/ImportFlow";
 
 // Export metaobjects to CSV, and import a CSV back to create or update them.
 // Product rich text metafields have their own page — see `app.rich-text.tsx`.
@@ -322,24 +330,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 };
 
-// Decorative dark-terminal backdrop. It is painted by a fixed layer sitting at
-// z-index -1, which is only visible if the body behind it is transparent — so
-// the page tints the body while it is mounted and puts it back on the way out.
-// Nothing here is interactive, and it is hidden from assistive tech.
-function HackBackdrop() {
-  useEffect(() => {
-    document.body.classList.add(styles.hackBody);
-    return () => document.body.classList.remove(styles.hackBody);
-  }, []);
-
-  return (
-    <div className={styles.backdrop} aria-hidden="true">
-      <div className={styles.grid} />
-      <div className={styles.sweep} />
-      <div className={styles.scanlines} />
-    </div>
-  );
-}
+// The decorative dark-terminal backdrop that used to live here — a fixed CRT
+// layer with scanlines and a sweeping refresh band, painted by tinting
+// `document.body` while the route was mounted — has been removed.
+//
+// It was on this page only, so the app changed visual identity when you moved
+// between tools; it forced a dark surface behind Polaris components that were
+// still rendering in the admin's light theme; and it made one tool look like
+// the app's centrepiece when the front door moved to `/app`. None of that is
+// recoverable by tuning it, because the problem was that it was per-page.
+//
+// If the app wants a distinctive look, the place for it is the whole app and
+// the mechanism is the theme, not one route reaching into `document.body`.
 
 export default function ImportExportPage() {
   const { definitions } = useLoaderData<typeof loader>();
@@ -347,9 +349,7 @@ export default function ImportExportPage() {
 
   // Which definition the export buttons point at, and the default target for
   // an entries import.
-  const [selectedType, setSelectedType] = useState(
-    definitions[0]?.type ?? "",
-  );
+  const [selectedType, setSelectedType] = useState(definitions[0]?.type ?? "");
   const [exporting, setExporting] = useState<"entries" | "definition" | null>(
     null,
   );
@@ -373,10 +373,18 @@ export default function ImportExportPage() {
     }
   };
 
-  return (
-    <s-page heading="Metaobjects import & export">
-      <HackBackdrop />
+  // Which of choose → review → apply the page is showing. Driven by the shape
+  // of the last response rather than by state of its own, so a browser back or
+  // a re-submitted form cannot leave the indicator disagreeing with the page.
+  const step: 1 | 2 | 3 =
+    data?.step === "applied"
+      ? 3
+      : data?.step === "plan" || data?.step === "plan-definition"
+        ? 2
+        : 1;
 
+  return (
+    <s-page heading="Metaobjects">
       <s-section heading="Export">
         {definitions.length === 0 ? (
           <s-paragraph>
@@ -385,12 +393,21 @@ export default function ImportExportPage() {
           </s-paragraph>
         ) : (
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Pick a metaobject type, then download either its{" "}
-              <strong>entries</strong> (the data, one row per entry) or its{" "}
-              <strong>definition</strong> (the schema — import that into another
-              store first so the entries have somewhere to land).
-            </s-paragraph>
+            <Guide id="metaobjects-export" title="Entries or definition?">
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  <strong>Entries</strong> is the data — one row per metaobject,
+                  one column per field. This is the file to edit when you want
+                  to change content.
+                </s-paragraph>
+                <s-paragraph>
+                  <strong>Definition</strong> is the schema: which fields the
+                  type has and what they hold. Moving a type to another store
+                  means importing its definition there first, so the entries
+                  have somewhere to land.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
 
             <s-select
               label="Metaobject type"
@@ -402,30 +419,34 @@ export default function ImportExportPage() {
             >
               {definitions.map((definition) => (
                 <s-option key={definition.id} value={definition.type}>
-                  {definition.name} ({definition.type}) — {definition.entryCount}{" "}
-                  entries
+                  {definition.name} ({definition.type}) —{" "}
+                  {definition.entryCount} entries
                 </s-option>
               ))}
             </s-select>
 
+            {/* The columns the chosen file will have, before downloading it.
+                Subdued because it confirms the selection rather than asking
+                anything — it should be available to read, not compete with the
+                select above it. */}
             {selected && (
-              <s-paragraph>
-                <s-text>
-                  {selected.fieldKeys.length} field(s):{" "}
-                  {selected.fieldKeys.join(", ")}
-                </s-text>
+              <s-paragraph color="subdued">
+                {selected.fieldKeys.length} field
+                {selected.fieldKeys.length === 1 ? "" : "s"}:{" "}
+                {selected.fieldKeys.join(", ")}
               </s-paragraph>
             )}
 
             {exportError && (
-              <s-banner tone="critical">
+              <s-banner tone="critical" heading="Export failed">
                 <s-paragraph>{exportError}</s-paragraph>
               </s-banner>
             )}
 
-            <div className={styles.actions}>
+            <Actions>
               <s-button
                 variant="primary"
+                icon="download"
                 onClick={() => runExport("entries")}
                 {...(exporting === "entries" ? { loading: true } : {})}
                 {...(exporting ? { disabled: true } : {})}
@@ -433,13 +454,14 @@ export default function ImportExportPage() {
                 Download entries CSV
               </s-button>
               <s-button
+                icon="download"
                 onClick={() => runExport("definition")}
                 {...(exporting === "definition" ? { loading: true } : {})}
                 {...(exporting ? { disabled: true } : {})}
               >
                 Download definition CSV
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         )}
       </s-section>
@@ -448,23 +470,33 @@ export default function ImportExportPage() {
         <fetcher.Form method="post" encType="multipart/form-data">
           <input type="hidden" name="intent" value="plan" />
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              An <strong>entries</strong> CSV needs a <s-text>handle</s-text>{" "}
-              column plus one column per field. Rows are matched by handle: a
-              known handle is updated, a new one creates a metaobject. A{" "}
-              <strong>definition</strong> CSV is detected automatically and
-              creates the schema instead.
-            </s-paragraph>
+            <Steps current={step} />
 
-            <s-paragraph>
-              A <strong>file</strong> field accepts an image URL as well as the{" "}
-              <s-text>gid://</s-text> value an export writes. Any URL is pulled
-              into Content &rarr; Files and linked to the entry, so a sheet made
-              by hand needs no uploading first. Mixing the two in one file is
-              fine &mdash; a cell that already holds a gid is left exactly as it
-              is. Link directly to the image, and separate several with{" "}
-              <s-text>;</s-text> on a list field.
-            </s-paragraph>
+            <Guide id="metaobjects-import" title="What your file needs">
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  An <strong>entries</strong> CSV needs a{" "}
+                  <s-text type="strong">handle</s-text> column plus one column
+                  per field. Rows are matched by handle: a known handle is
+                  updated, a new one creates a metaobject.
+                </s-paragraph>
+                <s-paragraph>
+                  A <strong>definition</strong> CSV is recognised automatically
+                  and creates the schema instead — you do not need to tell the
+                  page which kind you are uploading.
+                </s-paragraph>
+                <s-paragraph>
+                  A <strong>file</strong> field accepts an image URL as well as
+                  the <s-text type="strong">gid://</s-text> value an export
+                  writes. Any URL is pulled into Content &rarr; Files and linked
+                  to the entry, so a sheet made by hand needs no uploading
+                  first. Mixing the two in one file is fine — a cell that
+                  already holds a gid is left exactly as it is. Link directly to
+                  the image, and separate several with{" "}
+                  <s-text type="strong">;</s-text> on a list field.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
 
             <s-select
               label="Import entries into"
@@ -481,22 +513,18 @@ export default function ImportExportPage() {
               ))}
             </s-select>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>CSV file</span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="file"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+            <CsvDropZone />
 
-            <div className={styles.actions}>
-              <s-button type="submit" {...(busy ? { loading: true } : {})}>
+            <Actions>
+              <s-button
+                type="submit"
+                variant="primary"
+                icon="import"
+                {...(busy ? { loading: true } : {})}
+              >
                 Review changes
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         </fetcher.Form>
       </s-section>
@@ -510,32 +538,41 @@ export default function ImportExportPage() {
       )}
 
       {data?.step === "plan" && (
-        <s-section heading="Review — nothing has been written yet">
+        <s-section heading="Review">
           <s-stack direction="block" gap="base">
-            <s-stack direction="inline" gap="small-300">
-              <s-badge tone="success">
-                {data.plan.counts.create} to create
-              </s-badge>
-              <s-badge tone="info">{data.plan.counts.update} to update</s-badge>
-              <s-badge tone="neutral">
-                {data.plan.counts.unchanged} unchanged
-              </s-badge>
-              {data.plan.counts.error > 0 && (
-                <s-badge tone="critical">
-                  {data.plan.counts.error} with errors
-                </s-badge>
-              )}
-              {data.plan.pendingUploads.length > 0 && (
-                <s-badge tone="info">
-                  {data.plan.pendingUploads.length} image(s) to upload
-                </s-badge>
-              )}
-              {data.plan.reusedFiles > 0 && (
-                <s-badge tone="neutral">
-                  {data.plan.reusedFiles} image(s) already in Files
-                </s-badge>
-              )}
-            </s-stack>
+            <Steps current={2} />
+
+            {/* The reassurance is a banner, not a heading. It used to be part
+                of the section title ("Review — nothing has been written yet"),
+                where it made the heading long enough to skim past and left the
+                most important promise on the page competing with a label. */}
+            <s-banner tone="info">
+              <s-paragraph>
+                Nothing has been written yet. This is what the file would do —
+                the store changes only when you press the button at the bottom.
+              </s-paragraph>
+            </s-banner>
+
+            <PlanSummary
+              counts={data.plan.counts}
+              extra={
+                <>
+                  {data.plan.pendingUploads.length > 0 && (
+                    <s-badge tone="info" icon="image-add">
+                      {data.plan.pendingUploads.length} image
+                      {data.plan.pendingUploads.length === 1 ? "" : "s"} to
+                      upload
+                    </s-badge>
+                  )}
+                  {data.plan.reusedFiles > 0 && (
+                    <s-badge tone="neutral" icon="image">
+                      {data.plan.reusedFiles} image
+                      {data.plan.reusedFiles === 1 ? "" : "s"} already in Files
+                    </s-badge>
+                  )}
+                </>
+              }
+            />
 
             {data.plan.pendingUploads.length > 0 && (
               <s-banner tone="info">
@@ -594,15 +631,17 @@ export default function ImportExportPage() {
               </s-banner>
             )}
 
-            {/* A wide plan table would otherwise push the whole embedded page
-                sideways on a narrow screen. */}
-            <div className={styles.tableScroll}>
-              <s-table>
+            <TableScroll>
+              <s-table variant="auto">
                 <s-table-header-row>
+                  {/* `listSlot` is what lets `variant="auto"` collapse the
+                      table into readable rows on a narrow screen instead of a
+                      horizontal scroll: the handle becomes each row's title,
+                      the action its badge, the rest labelled detail. */}
                   <s-table-header>Row</s-table-header>
-                  <s-table-header>Handle</s-table-header>
-                  <s-table-header>Action</s-table-header>
-                  <s-table-header>Details</s-table-header>
+                  <s-table-header listSlot="primary">Handle</s-table-header>
+                  <s-table-header listSlot="inline">Action</s-table-header>
+                  <s-table-header listSlot="labeled">Details</s-table-header>
                 </s-table-header-row>
                 <s-table-body>
                   {data.plan.rows.slice(0, 100).map((row) => (
@@ -634,43 +673,43 @@ export default function ImportExportPage() {
                   ))}
                 </s-table-body>
               </s-table>
-            </div>
+            </TableScroll>
 
-            {data.plan.rows.length > 100 && (
-              <s-paragraph>
-                Showing the first 100 of {data.plan.rows.length} rows. All of
-                them will be imported.
-              </s-paragraph>
-            )}
+            <TruncationNote shown={100} total={data.plan.rows.length} />
 
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="apply" />
               <input type="hidden" name="kind" value="entries" />
               <input type="hidden" name="type" value={data.type} />
               <input type="hidden" name="csv" value={data.csv} />
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="submit"
                   variant="primary"
+                  icon="check"
                   {...(busy ? { loading: true } : {})}
                 >
                   Import {data.plan.counts.create + data.plan.counts.update}{" "}
                   entries
                 </s-button>
-              </div>
+              </Actions>
             </fetcher.Form>
           </s-stack>
         </s-section>
       )}
 
       {data?.step === "plan-definition" && (
-        <s-section heading="Review — definition CSV">
+        <s-section heading="Review">
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              This file describes {data.summary.length} definition(s). Existing
-              types are not modified — creating one that already exists reports
-              an error rather than overwriting it.
-            </s-paragraph>
+            <Steps current={2} />
+            <s-banner tone="info">
+              <s-paragraph>
+                This is a definition CSV, so it creates schemas rather than
+                entries. Nothing has been written yet. Existing types are never
+                modified — creating one that already exists reports an error
+                instead of overwriting it.
+              </s-paragraph>
+            </s-banner>
             <s-unordered-list>
               {data.summary.map((line) => (
                 <s-list-item key={line}>{line}</s-list-item>
@@ -681,15 +720,17 @@ export default function ImportExportPage() {
               <input type="hidden" name="intent" value="apply" />
               <input type="hidden" name="kind" value="definition" />
               <input type="hidden" name="csv" value={data.csv} />
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="submit"
                   variant="primary"
+                  icon="check"
                   {...(busy ? { loading: true } : {})}
                 >
-                  Create definition(s)
+                  Create {data.summary.length} definition
+                  {data.summary.length === 1 ? "" : "s"}
                 </s-button>
-              </div>
+              </Actions>
             </fetcher.Form>
           </s-stack>
         </s-section>
@@ -698,6 +739,7 @@ export default function ImportExportPage() {
       {data?.step === "applied" && (
         <s-section heading="Import finished">
           <s-stack direction="block" gap="base">
+            <Steps current={3} />
             <s-banner tone={data.failures.length ? "warning" : "success"}>
               <s-paragraph>
                 {data.created} created, {data.updated} updated,{" "}

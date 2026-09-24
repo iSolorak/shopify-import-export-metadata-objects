@@ -40,7 +40,13 @@ import {
   familyFieldColumn,
   type ColorFamilyPlan,
 } from "../lib/color-family";
-import styles from "./app._index/styles.module.css";
+import { Guide } from "../components/ui/Guide";
+import {
+  Actions,
+  CsvDropZone,
+  Steps,
+  TableScroll,
+} from "../components/ui/ImportFlow";
 
 // Colour families, both halves in one sheet.
 //
@@ -155,10 +161,15 @@ async function buildPlan(
   setup: ColorFamilySetup,
   csv: string,
   clearEmpty: boolean,
-): Promise<{ ok: true; plan: ColorFamilyPlan } | { ok: false; message: string }> {
+): Promise<
+  { ok: true; plan: ColorFamilyPlan } | { ok: false; message: string }
+> {
   const rows = parseCsv(csv);
   if (rows.length < 2) {
-    return { ok: false, message: "That file has a header row but no data rows." };
+    return {
+      ok: false,
+      message: "That file has a header row but no data rows.",
+    };
   }
 
   const records = rowsToRecords(rows);
@@ -340,7 +351,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         change.values,
       );
       if (outcome.ok) familiesWritten++;
-      else failures.push(`Family ${change.label}: ${outcome.errors.join("; ")}`);
+      else
+        failures.push(`Family ${change.label}: ${outcome.errors.join("; ")}`);
     }
 
     // Batched, then sequential. `metafieldsSet` takes 25 per call and these
@@ -366,7 +378,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     let cleared = 0;
-    for (let start = 0; start < removals.length; start += METAFIELD_BATCH_SIZE) {
+    for (
+      let start = 0;
+      start < removals.length;
+      start += METAFIELD_BATCH_SIZE
+    ) {
       const batch = removals.slice(start, start + METAFIELD_BATCH_SIZE);
       const outcome = await deleteMetafields(
         admin,
@@ -411,6 +427,11 @@ export default function ColorFamilyPage() {
 
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
+
+  // Derived from the response rather than kept in state, so back-navigation and
+  // a re-submitted form cannot leave the indicator out of step with the page.
+  const step: 1 | 2 | 3 =
+    data?.step === "applied" ? 3 : data?.step === "plan" ? 2 : 1;
   const plan = data?.step === "plan" ? data.plan : null;
 
   const runExport = async (kind: string) => {
@@ -490,23 +511,27 @@ export default function ColorFamilyPage() {
             {setup.hexFieldKey ? (
               <>
                 {" "}
-                Its <s-text>{setup.hexFieldKey}</s-text> field is the hex swatch,
-                exported as <s-text>{FAMILY_HEX_COLUMN}</s-text>.
+                Its <s-text>{setup.hexFieldKey}</s-text> field is the hex
+                swatch, exported as <s-text>{FAMILY_HEX_COLUMN}</s-text>.
               </>
             ) : (
-              <> It has no colour field, so there is no hex column of its own.</>
+              <>
+                {" "}
+                It has no colour field, so there is no hex column of its own.
+              </>
             )}
           </s-paragraph>
 
           {setup.positional && (
             <s-banner tone="info">
               <s-paragraph>
-                <s-text>{setup.column}</s-text> is a <strong>list on the
-                product</strong>, so entry N belongs to variant N — the same
-                shape <s-text>shopify.color-pattern</s-text> uses. A row is
-                placed by its variant&rsquo;s position as the store reports it,
-                never by where the row sits in the file, so sorting or
-                filtering the spreadsheet is safe.
+                <s-text>{setup.column}</s-text> is a{" "}
+                <strong>list on the product</strong>, so entry N belongs to
+                variant N — the same shape{" "}
+                <s-text>shopify.color-pattern</s-text> uses. A row is placed by
+                its variant&rsquo;s position as the store reports it, never by
+                where the row sits in the file, so sorting or filtering the
+                spreadsheet is safe.
               </s-paragraph>
               <s-paragraph>
                 Because a list cannot have holes, changing one variant rewrites
@@ -523,8 +548,8 @@ export default function ColorFamilyPage() {
               <s-paragraph>
                 <s-text>{setup.column}</s-text> is a single reference on the{" "}
                 <strong>product</strong>, so it holds one family for all of its
-                variants. Rows of the same product asking for different
-                families are an error on all of them.
+                variants. Rows of the same product asking for different families
+                are an error on all of them.
               </s-paragraph>
             </s-banner>
           )}
@@ -580,7 +605,11 @@ export default function ColorFamilyPage() {
         <s-stack direction="block" gap="base">
           <s-paragraph>
             One row per variant. Columns:{" "}
-            <s-text>{[FAMILY_COLUMN, ...fieldColumns, ...READ_ONLY_COLUMNS].join(", ")}</s-text>
+            <s-text>
+              {[FAMILY_COLUMN, ...fieldColumns, ...READ_ONLY_COLUMNS].join(
+                ", ",
+              )}
+            </s-text>
             , after the identifying columns. Only{" "}
             <s-text>{[FAMILY_COLUMN, ...fieldColumns].join(", ")}</s-text> are
             written back on import.
@@ -600,7 +629,9 @@ export default function ColorFamilyPage() {
             <s-option value="name">
               Display name — &ldquo;Peach Tones&rdquo;
             </s-option>
-            <s-option value="handle">Handle — &ldquo;peach-tones&rdquo;</s-option>
+            <s-option value="handle">
+              Handle — &ldquo;peach-tones&rdquo;
+            </s-option>
           </s-select>
 
           <s-checkbox
@@ -617,7 +648,7 @@ export default function ColorFamilyPage() {
             </s-banner>
           )}
 
-          <div className={styles.actions}>
+          <Actions>
             <s-button
               variant="primary"
               onClick={() => runExport("values")}
@@ -633,7 +664,7 @@ export default function ColorFamilyPage() {
             >
               Download empty template
             </s-button>
-          </div>
+          </Actions>
         </s-stack>
       </s-section>
 
@@ -647,63 +678,65 @@ export default function ColorFamilyPage() {
 
         <s-section heading="Import & update from CSV">
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Rows are matched by <strong>{SKU_COLUMN}</strong> first, then by{" "}
-              <strong>{HANDLE_COLUMN}</strong> plus{" "}
-              <strong>{VARIANT_TITLE_COLUMN}</strong>, then by{" "}
-              <strong>{HANDLE_COLUMN}</strong> plus the option columns. The
-              identifying columns are never written. No variant and no family is
-              ever created or deleted.
-            </s-paragraph>
+            <Steps current={step} />
 
-            <s-paragraph>
-              <strong>{FAMILY_COLUMN}</strong> assigns one variant to a family,
-              by display name or handle. A name that matches no family, or two,
-              is an error on that row rather than a guess.
-              {setup.positional && (
-                <>
-                  {" "}
-                  It is written into{" "}
-                  <s-text>{setup.column}</s-text> at that variant&rsquo;s
-                  position, which means rewriting its product&rsquo;s whole
-                  list. Every variant of a product you touch therefore has to
-                  end up with a family &mdash; the ones your file does not
-                  mention keep what they already have, and a product that would
-                  be left with a gap is refused.
-                </>
-              )}
-            </s-paragraph>
+            <Guide
+              id="color-family-import"
+              title="How rows are matched, and what each column changes"
+            >
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  Rows are matched by <strong>{SKU_COLUMN}</strong> first, then
+                  by <strong>{HANDLE_COLUMN}</strong> plus{" "}
+                  <strong>{VARIANT_TITLE_COLUMN}</strong>, then by{" "}
+                  <strong>{HANDLE_COLUMN}</strong> plus the option columns. The
+                  identifying columns are never written. No variant and no
+                  family is ever created or deleted.
+                </s-paragraph>
 
-            <s-paragraph>
-              <strong>{fieldColumns.join(", ") || "Family field columns"}</strong>{" "}
-              edit the <strong>family entry</strong>, so every variant in that
-              family changes with it. The family edited is the one named in{" "}
-              <s-text>{FAMILY_COLUMN}</s-text> on the same row — so a row that
-              both moves a variant and sets a hex sets it on the family it moved
-              to. Rows of the same family asking for different values are an
-              error on all of them.
-            </s-paragraph>
+                <s-paragraph>
+                  <strong>{FAMILY_COLUMN}</strong> assigns one variant to a
+                  family, by display name or handle. A name that matches no
+                  family, or two, is an error on that row rather than a guess.
+                  {setup.positional && (
+                    <>
+                      {" "}
+                      It is written into <s-text>{setup.column}</s-text> at that
+                      variant&rsquo;s position, which means rewriting its
+                      product&rsquo;s whole list. Every variant of a product you
+                      touch therefore has to end up with a family &mdash; the
+                      ones your file does not mention keep what they already
+                      have, and a product that would be left with a gap is
+                      refused.
+                    </>
+                  )}
+                </s-paragraph>
 
-            <s-paragraph>
-              An <strong>empty cell is skipped</strong>, never written as a
-              blank, so a partly-filled spreadsheet cannot erase anything. A
-              value that already matches is not written at all, so re-running
-              the same file is free and a run that times out is safe to repeat.
-              Row order does not matter: a variant&rsquo;s position comes from
-              the store once the row has been matched, so the sheet can be
-              sorted or filtered freely.
-            </s-paragraph>
+                <s-paragraph>
+                  <strong>
+                    {fieldColumns.join(", ") || "Family field columns"}
+                  </strong>{" "}
+                  edit the <strong>family entry</strong>, so every variant in
+                  that family changes with it. The family edited is the one
+                  named in <s-text>{FAMILY_COLUMN}</s-text> on the same row — so
+                  a row that both moves a variant and sets a hex sets it on the
+                  family it moved to. Rows of the same family asking for
+                  different values are an error on all of them.
+                </s-paragraph>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>CSV file</span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="file"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+                <s-paragraph>
+                  An <strong>empty cell is skipped</strong>, never written as a
+                  blank, so a partly-filled spreadsheet cannot erase anything. A
+                  value that already matches is not written at all, so
+                  re-running the same file is free and a run that times out is
+                  safe to repeat. Row order does not matter: a variant&rsquo;s
+                  position comes from the store once the row has been matched,
+                  so the sheet can be sorted or filtered freely.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
+
+            <CsvDropZone name="file" label="CSV file" accept=".csv,text/csv" />
 
             <s-checkbox
               name={CLEAR_EMPTY_FIELD}
@@ -714,7 +747,7 @@ export default function ColorFamilyPage() {
                 : {})}
             />
 
-            <div className={styles.actions}>
+            <Actions>
               <s-button
                 type="button"
                 onClick={submitWith("plan")}
@@ -722,7 +755,7 @@ export default function ColorFamilyPage() {
               >
                 Review changes
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         </s-section>
 
@@ -735,8 +768,17 @@ export default function ColorFamilyPage() {
         )}
 
         {plan && (
-          <s-section heading="Review — nothing has been written yet">
+          <s-section heading="Review">
             <s-stack direction="block" gap="base">
+              <Steps current={2} />
+
+              <s-banner tone="info">
+                <s-paragraph>
+                  Nothing has been written yet. This is what the file would do —
+                  the store changes only when you press the button at the
+                  bottom.
+                </s-paragraph>
+              </s-banner>
               <s-stack direction="inline" gap="small-300">
                 <s-badge tone="info">{plan.counts.update} to update</s-badge>
                 <s-badge tone="neutral">
@@ -795,7 +837,7 @@ export default function ColorFamilyPage() {
               )}
 
               {plan.products.length > 0 && (
-                <div className={styles.tableScroll}>
+                <TableScroll>
                   <s-table>
                     <s-table-header-row>
                       <s-table-header>Product</s-table-header>
@@ -806,7 +848,9 @@ export default function ColorFamilyPage() {
                       {plan.products.map((change) => (
                         <s-table-row key={change.productId}>
                           <s-table-cell>{change.label}</s-table-cell>
-                          <s-table-cell>{change.rowNumbers.length}</s-table-cell>
+                          <s-table-cell>
+                            {change.rowNumbers.length}
+                          </s-table-cell>
                           <s-table-cell>
                             {change.value == null
                               ? "cleared"
@@ -816,11 +860,11 @@ export default function ColorFamilyPage() {
                       ))}
                     </s-table-body>
                   </s-table>
-                </div>
+                </TableScroll>
               )}
 
               {plan.families.length > 0 && (
-                <div className={styles.tableScroll}>
+                <TableScroll>
                   <s-table>
                     <s-table-header-row>
                       <s-table-header>Family</s-table-header>
@@ -843,12 +887,12 @@ export default function ColorFamilyPage() {
                       ))}
                     </s-table-body>
                   </s-table>
-                </div>
+                </TableScroll>
               )}
 
               {/* A wide plan table would otherwise push the whole embedded
                   page sideways on a narrow screen. */}
-              <div className={styles.tableScroll}>
+              <TableScroll>
                 <s-table>
                   <s-table-header-row>
                     <s-table-header>Row</s-table-header>
@@ -883,7 +927,7 @@ export default function ColorFamilyPage() {
                     ))}
                   </s-table-body>
                 </s-table>
-              </div>
+              </TableScroll>
 
               {plan.rows.length > 100 && (
                 <s-paragraph>
@@ -892,7 +936,7 @@ export default function ColorFamilyPage() {
                 </s-paragraph>
               )}
 
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="button"
                   variant="primary"
@@ -902,7 +946,7 @@ export default function ColorFamilyPage() {
                   Apply {plan.counts.update} row
                   {plan.counts.update === 1 ? "" : "s"}
                 </s-button>
-              </div>
+              </Actions>
             </s-stack>
           </s-section>
         )}
@@ -911,11 +955,12 @@ export default function ColorFamilyPage() {
       {data?.step === "applied" && (
         <s-section heading="Import finished">
           <s-stack direction="block" gap="base">
+            <Steps current={3} />
             <s-banner tone={data.failures.length ? "warning" : "success"}>
               <s-paragraph>
                 {data.variants} variant(s) changed across {data.assigned}{" "}
-                write(s) and {data.cleared} removal(s),{" "}
-                {data.families} family entr
+                write(s) and {data.cleared} removal(s), {data.families} family
+                entr
                 {data.families === 1 ? "y" : "ies"} updated,{" "}
                 {data.failures.length} failed.
               </s-paragraph>

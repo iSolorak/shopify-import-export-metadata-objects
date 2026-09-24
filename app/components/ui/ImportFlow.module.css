@@ -1,0 +1,106 @@
+/* Shared furniture for the import pages. See ImportFlow.tsx. */
+
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-200) var(--sp-400);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--font-sans);
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-200);
+  font-size: var(--font-size-body-md);
+  line-height: var(--line-height-body-md);
+  color: var(--color-text-secondary);
+}
+
+/* A hairline between steps, so the row reads as a sequence rather than three
+   unrelated labels. Drawn on the item rather than as a separate element so it
+   disappears correctly when the row wraps. */
+.step + .step::before {
+  content: "";
+  inline-size: var(--sp-400);
+  block-size: var(--border-width);
+  /* The rule belongs to the gap before the marker, not after the label. */
+  margin-inline-start: calc(var(--sp-400) * -1);
+  margin-inline-end: var(--sp-100);
+  background: var(--color-border);
+}
+
+/* The label never wraps mid-step; a step that does not fit moves to the next
+   line whole, which is what `flex-wrap` on `.steps` is for. */
+.stepLabel {
+  white-space: nowrap;
+}
+
+.marker {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  border-radius: var(--radius-full);
+  border: var(--border-width) solid var(--color-border);
+  font-size: var(--font-size-body-xs);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.step[data-state="current"] {
+  color: var(--color-text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.step[data-state="current"] .marker {
+  border-color: transparent;
+  background: var(--p-color-bg-fill-brand, #303030);
+  color: var(--p-color-text-brand-on-bg-fill, #ffffff);
+}
+
+.step[data-state="done"] .marker {
+  border-color: transparent;
+  background: var(--p-color-bg-fill-success-secondary, #cdfee1);
+  color: var(--p-color-text-success, #0c5132);
+}
+
+.visuallyHidden {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.tableScroll {
+  max-inline-size: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  /* Fades the right edge while there is more table off-screen and resolves to
+     nothing once scrolled to the end — the standard background-attachment
+     shadow trick, so it needs no scroll listener. */
+  background:
+    linear-gradient(to right, var(--color-bg-surface) 30%, rgb(0 0 0 / 0) 100%)
+      left center / 2.5rem 100% no-repeat,
+    linear-gradient(to left, var(--color-bg-surface) 30%, rgb(0 0 0 / 0) 100%)
+      right center / 2.5rem 100% no-repeat,
+    radial-gradient(farthest-side at 0 50%, rgb(0 0 0 / 0.12), rgb(0 0 0 / 0))
+      left center / 0.75rem 100% no-repeat,
+    radial-gradient(
+        farthest-side at 100% 50%,
+        rgb(0 0 0 / 0.12),
+        rgb(0 0 0 / 0)
+      )
+      right center / 0.75rem 100% no-repeat;
+  background-attachment: local, local, scroll, scroll;
+}

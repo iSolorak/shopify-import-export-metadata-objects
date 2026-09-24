@@ -24,7 +24,13 @@ import {
   uploadRemoteVideo,
   type ProbeResult,
 } from "../lib/remote-video";
-import styles from "./app._index/styles.module.css";
+import { Guide } from "../components/ui/Guide";
+import {
+  Actions,
+  CsvDropZone,
+  Steps,
+  TableScroll,
+} from "../components/ui/ImportFlow";
 
 // Add videos hosted on another site to products' media galleries.
 //
@@ -77,7 +83,10 @@ async function buildPlan(
 > {
   const rows = parseCsv(csv);
   if (rows.length < 2) {
-    return { ok: false, message: "That file has a header row but no data rows." };
+    return {
+      ok: false,
+      message: "That file has a header row but no data rows.",
+    };
   }
 
   const columns = resolveColumns(rows[0].map((header) => header.trim()));
@@ -219,52 +228,60 @@ export default function ProductVideosPage() {
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
 
+  // Derived from the response rather than kept in state, so back-navigation and
+  // a re-submitted form cannot leave the indicator out of step with the page.
+  const step: 1 | 2 | 3 =
+    data?.step === "applied" ? 3 : data?.step === "plan" ? 2 : 1;
+
   return (
-    <s-page heading="Add product videos">
+    <s-page heading="Product videos">
       <s-section heading="Import">
         <fetcher.Form method="post" encType="multipart/form-data">
           <input type="hidden" name="intent" value="plan" />
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              A CSV with <s-text>{HANDLE_COLUMN}</s-text>,{" "}
-              <s-text>{TITLE_COLUMN}</s-text> and{" "}
-              <s-text>{VIDEO_URL_COLUMN}</s-text> columns. Each row&rsquo;s video
-              is downloaded from its URL and added to that product&rsquo;s media
-              gallery. Extra columns are ignored.
-            </s-paragraph>
+            <Steps current={step} />
 
-            <s-paragraph>
-              Shopify will not accept a video by URL the way it accepts an image,
-              so the file is fetched here and re-uploaded. The URL must be{" "}
-              <strong>https</strong> and serve an <s-text>.mp4</s-text>,{" "}
-              <s-text>.mov</s-text> or <s-text>.webm</s-text> with a
-              Content-Length.
-            </s-paragraph>
+            <Guide id="product-videos-import" title="What your file needs">
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  A CSV with <s-text type="strong">{HANDLE_COLUMN}</s-text>,{" "}
+                  <s-text type="strong">{TITLE_COLUMN}</s-text> and{" "}
+                  <s-text type="strong">{VIDEO_URL_COLUMN}</s-text> columns.
+                  Each row&rsquo;s video is downloaded from its URL and added to
+                  that product&rsquo;s media gallery. Extra columns are ignored.
+                </s-paragraph>
 
-            <s-paragraph>
-              The <s-text>{TITLE_COLUMN}</s-text> becomes the video&rsquo;s{" "}
-              <strong>alt text</strong>, and re-running the same file{" "}
-              <strong>skips</strong> any product that already has a video with
-              that alt text — so a large import can be run again safely if it
-              does not finish.
-            </s-paragraph>
+                <s-paragraph>
+                  Shopify will not accept a video by URL the way it accepts an
+                  image, so the file is fetched here and re-uploaded. The URL
+                  must be <strong>https</strong> and serve an{" "}
+                  <s-text type="strong">.mp4</s-text>,{" "}
+                  <s-text type="strong">.mov</s-text> or{" "}
+                  <s-text type="strong">.webm</s-text> with a Content-Length.
+                </s-paragraph>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>CSV file</span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="file"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+                <s-paragraph>
+                  The <s-text type="strong">{TITLE_COLUMN}</s-text> becomes the
+                  video&rsquo;s <strong>alt text</strong>, and re-running the
+                  same file <strong>skips</strong> any product that already has
+                  a video with that alt text — so a large import can be run
+                  again safely if it does not finish.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
 
-            <div className={styles.actions}>
-              <s-button type="submit" {...(busy ? { loading: true } : {})}>
+            <CsvDropZone name="file" label="CSV file" accept=".csv,text/csv" />
+
+            <Actions>
+              <s-button
+                type="submit"
+                variant="primary"
+                icon="import"
+                {...(busy ? { loading: true } : {})}
+              >
                 Review changes
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         </fetcher.Form>
       </s-section>
@@ -278,8 +295,16 @@ export default function ProductVideosPage() {
       )}
 
       {data?.step === "plan" && (
-        <s-section heading="Review — nothing has been uploaded yet">
+        <s-section heading="Review">
           <s-stack direction="block" gap="base">
+            <Steps current={2} />
+
+            <s-banner tone="info">
+              <s-paragraph>
+                Nothing has been uploaded yet. This is what the file would do —
+                the store changes only when you press the button at the bottom.
+              </s-paragraph>
+            </s-banner>
             <s-stack direction="inline" gap="small-300">
               <s-badge tone="info">{data.plan.counts.add} to add</s-badge>
               <s-badge tone="neutral">
@@ -295,7 +320,9 @@ export default function ProductVideosPage() {
             {data.plan.writeCount > 0 && (
               <s-banner
                 tone={
-                  data.plan.totalBytes > SLOW_ESTIMATE_BYTES ? "warning" : "info"
+                  data.plan.totalBytes > SLOW_ESTIMATE_BYTES
+                    ? "warning"
+                    : "info"
                 }
               >
                 <s-paragraph>
@@ -309,7 +336,7 @@ export default function ProductVideosPage() {
 
             {/* A wide plan table would otherwise push the whole embedded page
                 sideways on a narrow screen. */}
-            <div className={styles.tableScroll}>
+            <TableScroll>
               <s-table>
                 <s-table-header-row>
                   <s-table-header>Row</s-table-header>
@@ -344,7 +371,7 @@ export default function ProductVideosPage() {
                   ))}
                 </s-table-body>
               </s-table>
-            </div>
+            </TableScroll>
 
             {data.plan.rows.length > 100 && (
               <s-paragraph>
@@ -356,7 +383,7 @@ export default function ProductVideosPage() {
             <fetcher.Form method="post">
               <input type="hidden" name="intent" value="apply" />
               <input type="hidden" name="csv" value={data.csv} />
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="submit"
                   variant="primary"
@@ -365,7 +392,7 @@ export default function ProductVideosPage() {
                 >
                   Add {data.plan.writeCount} video(s)
                 </s-button>
-              </div>
+              </Actions>
             </fetcher.Form>
           </s-stack>
         </s-section>
@@ -374,6 +401,7 @@ export default function ProductVideosPage() {
       {data?.step === "applied" && (
         <s-section heading="Import finished">
           <s-stack direction="block" gap="base">
+            <Steps current={3} />
             <s-banner tone={data.failures.length ? "warning" : "success"}>
               <s-paragraph>
                 {data.added} video(s) added, {data.failures.length} failed.

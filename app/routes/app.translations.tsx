@@ -19,7 +19,13 @@ import {
   resolveMetafieldOwners,
 } from "../lib/translation-metafields.server";
 import { saveCsv } from "../lib/download-csv";
-import styles from "./app._index/styles.module.css";
+import { Guide } from "../components/ui/Guide";
+import {
+  Actions,
+  CsvDropZone,
+  Steps,
+  TableScroll,
+} from "../components/ui/ImportFlow";
 
 // Build a Shopify translations import file from a shop's own product export.
 //
@@ -295,6 +301,12 @@ export default function TranslationsPage() {
   }, [data]);
 
   const columns = data && data.step !== "error" ? data.columns : null;
+
+  // This page's three beats are not the usual choose/review/apply — there is no
+  // write step at all, because it produces a file for Shopify's own importer.
+  // The labels say so rather than borrowing words that would promise a store
+  // change this page never makes.
+  const step: 1 | 2 | 3 = data?.step === "built" ? 3 : columns ? 2 : 1;
   const mapping = data && data.step !== "error" ? data.mapping : {};
 
   return (
@@ -307,66 +319,66 @@ export default function TranslationsPage() {
       <fetcher.Form method="post" encType="multipart/form-data">
         <s-section heading="Your two files">
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Your shop&rsquo;s product export and Shopify&rsquo;s translations
-              export describe the same products under different IDs, so the two
-              cannot be joined directly. Products are matched by{" "}
-              <strong>handle</strong>, falling back to <strong>title</strong>,
-              which recovers the Shopify ID each translation row needs.
-            </s-paragraph>
+            <Steps
+              current={step}
+              labels={["Your two files", "Match the columns", "Download"]}
+            />
 
-            <s-paragraph>
-              Product fields — title, description, handle, product type and the
-              two SEO fields — plus this store&rsquo;s product metafields.
-              Metafield rows carry only a metafield ID, so the product they
-              belong to is looked up from the store when you map one.
-            </s-paragraph>
+            <Guide
+              id="translations-files"
+              title="Why two files, and how they join"
+            >
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  Your shop&rsquo;s product export and Shopify&rsquo;s
+                  translations export describe the same products under different
+                  IDs, so the two cannot be joined directly. Products are
+                  matched by <strong>handle</strong>, falling back to{" "}
+                  <strong>title</strong>, which recovers the Shopify ID each
+                  translation row needs.
+                </s-paragraph>
 
-            <s-paragraph>
-              A metafield of type <s-text>rich_text_field</s-text> is converted
-              to the JSON document Shopify stores, so plain text or HTML from
-              your export imports cleanly. Those targets are marked{" "}
-              <s-text>rich text</s-text> in the list.
-            </s-paragraph>
+                <s-paragraph>
+                  Product fields — title, description, handle, product type and
+                  the two SEO fields — plus this store&rsquo;s product
+                  metafields. Metafield rows carry only a metafield ID, so the
+                  product they belong to is looked up from the store when you
+                  map one.
+                </s-paragraph>
 
-            <s-paragraph>
-              An <strong>empty cell is skipped</strong>, never written as a
-              blank translation, so you can fill one field without disturbing
-              the others.
-            </s-paragraph>
+                <s-paragraph>
+                  A metafield of type <s-text>rich_text_field</s-text> is
+                  converted to the JSON document Shopify stores, so plain text
+                  or HTML from your export imports cleanly. Those targets are
+                  marked <s-text>rich text</s-text> in the list.
+                </s-paragraph>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>
-                Shopify translations export (the file to fill in)
-              </span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="translations"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+                <s-paragraph>
+                  An <strong>empty cell is skipped</strong>, never written as a
+                  blank translation, so you can fill one field without
+                  disturbing the others.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>
-                Product export (where the translated text comes from)
-              </span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="source"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+            <CsvDropZone
+              name="translations"
+              label="Shopify translations export (the file to fill in)"
+              accept=".csv,text/csv"
+            />
+
+            <CsvDropZone
+              name="source"
+              label="Product export (where the translated text comes from)"
+              accept=".csv,text/csv"
+            />
 
             {!columns && (
-              <div className={styles.actions}>
+              <Actions>
                 <s-button type="submit" {...(busy ? { loading: true } : {})}>
                   Read columns
                 </s-button>
-              </div>
+              </Actions>
             )}
           </s-stack>
         </s-section>
@@ -410,7 +422,7 @@ export default function TranslationsPage() {
 
               {/* A wide mapping table would otherwise push the whole embedded
                   page sideways on a narrow screen. */}
-              <div className={styles.tableScroll}>
+              <TableScroll>
                 <s-table>
                   <s-table-header-row>
                     <s-table-header>Column in your export</s-table-header>
@@ -460,9 +472,9 @@ export default function TranslationsPage() {
                     ))}
                   </s-table-body>
                 </s-table>
-              </div>
+              </TableScroll>
 
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="submit"
                   variant="primary"
@@ -470,7 +482,7 @@ export default function TranslationsPage() {
                 >
                   Build translation CSV
                 </s-button>
-              </div>
+              </Actions>
             </s-stack>
           </s-section>
         )}
@@ -496,7 +508,7 @@ export default function TranslationsPage() {
             </s-banner>
 
             {data.filled > 0 && (
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   onClick={() =>
                     saveCsv(data.csv, "shopify-translations-import.csv")
@@ -504,7 +516,7 @@ export default function TranslationsPage() {
                 >
                   Download again
                 </s-button>
-              </div>
+              </Actions>
             )}
 
             {data.unresolvedMetafields > 0 && (
@@ -536,10 +548,9 @@ export default function TranslationsPage() {
             {data.missingFields.length > 0 && (
               <s-banner tone="warning">
                 <s-paragraph>
-                  Nothing was written for:{" "}
-                  {data.missingFields.join(", ")}. Shopify only lists a field
-                  in the export once the product already has content in it, so
-                  there was no row to fill.
+                  Nothing was written for: {data.missingFields.join(", ")}.
+                  Shopify only lists a field in the export once the product
+                  already has content in it, so there was no row to fill.
                 </s-paragraph>
               </s-banner>
             )}

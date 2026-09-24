@@ -1,0 +1,122 @@
+/* Launcher cards for the home page. See TaskGrid.tsx. */
+
+.grid {
+  display: grid;
+  /* Two columns on a normal admin window, one on a phone, three on a wide
+     screen — `auto-fill` rather than a media query so it also reacts to the
+     admin's own sidebar opening and closing, which no breakpoint can see. */
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: var(--sp-300);
+}
+
+.card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-300);
+  padding: var(--sp-card-padding);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-300);
+  background: var(--color-bg-surface);
+  font-family: var(--font-sans);
+  text-decoration: none;
+  color: inherit;
+  /* The whole card is the target, not the title. A 17rem × ~5rem hit area is
+     the difference between scanning this page and aiming at it. */
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.card:hover {
+  border-color: var(--color-border-hover);
+  background: var(--color-bg-surface-hover);
+}
+
+/* A 1px lift on hover. Enough to say "this moves when you press it" and small
+   enough that a grid of them does not ripple as the pointer crosses. */
+.card:hover .chevron {
+  transform: translateX(0.125rem);
+}
+
+.card:focus-visible {
+  outline: 0.125rem solid var(--color-focused);
+  outline-offset: 0.125rem;
+}
+
+/* Nothing to act on yet: dimmed rather than hidden or disabled. The page still
+   tells you the tool exists — which is the point of a launcher — and the card
+   still opens, because its empty state explains what to do about it. */
+.card[data-empty] {
+  background: var(--color-bg-surface-secondary);
+}
+
+.card[data-empty] .icon,
+.card[data-empty] .title {
+  color: var(--color-text-secondary);
+}
+
+.icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: 2rem;
+  block-size: 2rem;
+  border-radius: var(--radius-200);
+  background: var(--color-bg-surface-secondary);
+  color: var(--color-text-secondary);
+}
+
+.card:hover .icon {
+  background: var(--color-bg-surface);
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-100);
+  /* Without this the long descriptions refuse to wrap and force the grid
+     column wider than its track. */
+  min-width: 0;
+}
+
+.title {
+  font-size: var(--font-size-heading-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-heading-md);
+  color: var(--color-text);
+}
+
+.description {
+  font-size: var(--font-size-body-md);
+  line-height: var(--line-height-body-md);
+  color: var(--color-text-secondary);
+}
+
+.meta {
+  margin-block-start: var(--sp-100);
+  font-size: var(--font-size-body-sm);
+  line-height: var(--line-height-body-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.chevron {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin-inline-start: auto;
+  /* Optically centred against the title's cap height rather than the row. */
+  padding-block-start: 0.125rem;
+  color: var(--color-text-secondary);
+  transition: transform 0.15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .chevron {
+    transition: none;
+  }
+}

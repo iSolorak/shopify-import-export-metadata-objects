@@ -41,7 +41,13 @@ import {
   metafieldColumns,
   planVariantMetafieldImport,
 } from "../lib/variant-metafield-csv.server";
-import styles from "./app._index/styles.module.css";
+import { Guide } from "../components/ui/Guide";
+import {
+  Actions,
+  CsvDropZone,
+  Steps,
+  TableScroll,
+} from "../components/ui/ImportFlow";
 
 // Export and update the metafields that live on product **variants**, together
 // with the product metafields that give them context.
@@ -129,7 +135,10 @@ async function buildPlan(
 > {
   const rows = parseCsv(csv);
   if (rows.length < 2) {
-    return { ok: false, message: "That file has a header row but no data rows." };
+    return {
+      ok: false,
+      message: "That file has a header row but no data rows.",
+    };
   }
 
   const records = rowsToRecords(rows);
@@ -346,7 +355,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     let cleared = 0;
-    for (let start = 0; start < removals.length; start += METAFIELD_BATCH_SIZE) {
+    for (
+      let start = 0;
+      start < removals.length;
+      start += METAFIELD_BATCH_SIZE
+    ) {
       const batch = removals.slice(start, start + METAFIELD_BATCH_SIZE);
       const outcome = await deleteMetafields(
         admin,
@@ -451,6 +464,11 @@ export default function VariantMetafieldsPage() {
 
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
+
+  // Derived from the response rather than kept in state, so back-navigation and
+  // a re-submitted form cannot leave the indicator out of step with the page.
+  const step: 1 | 2 | 3 =
+    data?.step === "applied" ? 3 : data?.step === "plan" ? 2 : 1;
   const plan = data?.step === "plan" ? data.plan : null;
 
   // Whether any product metafield survived the picker. The export route reads
@@ -535,7 +553,7 @@ export default function VariantMetafieldsPage() {
             looks exactly like an import that did nothing.
           </s-paragraph>
 
-          <div className={styles.tableScroll}>
+          <TableScroll>
             <s-table>
               <s-table-header-row>
                 <s-table-header>Owner</s-table-header>
@@ -564,9 +582,9 @@ export default function VariantMetafieldsPage() {
                 ))}
               </s-table-body>
             </s-table>
-          </div>
+          </TableScroll>
 
-          <div className={styles.actions}>
+          <Actions>
             <s-button
               onClick={() => runExport("definitions")}
               {...(exporting === "definitions" ? { loading: true } : {})}
@@ -574,7 +592,7 @@ export default function VariantMetafieldsPage() {
             >
               Download definitions CSV
             </s-button>
-          </div>
+          </Actions>
         </s-stack>
       </s-section>
 
@@ -603,7 +621,9 @@ export default function VariantMetafieldsPage() {
             name="refs"
             label="Write metaobject references as"
             onChange={(event: { currentTarget: { value: string } }) =>
-              setRefs(event.currentTarget.value === "handle" ? "handle" : "name")
+              setRefs(
+                event.currentTarget.value === "handle" ? "handle" : "name",
+              )
             }
           >
             {/* The selection lives on the option rather than the select, for
@@ -646,7 +666,7 @@ export default function VariantMetafieldsPage() {
             </s-banner>
           )}
 
-          <div className={styles.actions}>
+          <Actions>
             <s-button
               variant="primary"
               onClick={() => runExport("values")}
@@ -663,7 +683,7 @@ export default function VariantMetafieldsPage() {
             >
               Download empty template
             </s-button>
-          </div>
+          </Actions>
         </s-stack>
       </s-section>
 
@@ -675,42 +695,41 @@ export default function VariantMetafieldsPage() {
       >
         <s-section heading="Update from CSV">
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Rows are matched by <strong>{SKU_COLUMN}</strong>, and rows
-              without one by <strong>{HANDLE_COLUMN}</strong> plus their option
-              columns. The identifying columns are never written — editing{" "}
-              <s-text>title</s-text> here does not rename anything, it just
-              changes which variant the row finds. Variants your file does not
-              mention are left alone, and none are ever created or deleted.
-            </s-paragraph>
+            <Steps current={step} />
 
-            <s-paragraph>
-              <s-text>{PRODUCT_COLUMN_PREFIX}</s-text> columns write to the{" "}
-              <strong>product</strong>, once each, however many of its variants
-              the file lists. Two rows of the same product asking for different
-              values is an error on both — a product metafield has one value for
-              every variant. Columns containing{" "}
-              <s-text>&gt;</s-text> are expanded metaobject fields and are read
-              and ignored.
-            </s-paragraph>
+            <Guide id="variant-metafields-import" title="How rows are matched">
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  Rows are matched by <strong>{SKU_COLUMN}</strong>, and rows
+                  without one by <strong>{HANDLE_COLUMN}</strong> plus their
+                  option columns. The identifying columns are never written —
+                  editing <s-text type="strong">title</s-text> here does not
+                  rename anything, it just changes which variant the row finds.
+                  Variants your file does not mention are left alone, and none
+                  are ever created or deleted.
+                </s-paragraph>
 
-            <s-paragraph>
-              An <strong>empty cell is skipped</strong>, never written as a
-              blank, so a partly-filled spreadsheet cannot erase anything. A
-              value that already matches is not written at all, so re-running
-              the same file is free and a run that times out is safe to repeat.
-            </s-paragraph>
+                <s-paragraph>
+                  <s-text type="strong">{PRODUCT_COLUMN_PREFIX}</s-text> columns
+                  write to the <strong>product</strong>, once each, however many
+                  of its variants the file lists. Two rows of the same product
+                  asking for different values is an error on both — a product
+                  metafield has one value for every variant. Columns containing{" "}
+                  <s-text type="strong">&gt;</s-text> are expanded metaobject
+                  fields and are read and ignored.
+                </s-paragraph>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>CSV file</span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="file"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+                <s-paragraph>
+                  An <strong>empty cell is skipped</strong>, never written as a
+                  blank, so a partly-filled spreadsheet cannot erase anything. A
+                  value that already matches is not written at all, so
+                  re-running the same file is free and a run that times out is
+                  safe to repeat.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
+
+            <CsvDropZone name="file" label="CSV file" accept=".csv,text/csv" />
 
             <s-checkbox
               name={CLEAR_EMPTY_FIELD}
@@ -721,7 +740,7 @@ export default function VariantMetafieldsPage() {
                 : {})}
             />
 
-            <div className={styles.actions}>
+            <Actions>
               <s-button
                 type="button"
                 onClick={submitWith("plan")}
@@ -729,7 +748,7 @@ export default function VariantMetafieldsPage() {
               >
                 Review changes
               </s-button>
-            </div>
+            </Actions>
           </s-stack>
         </s-section>
 
@@ -742,8 +761,17 @@ export default function VariantMetafieldsPage() {
         )}
 
         {plan && (
-          <s-section heading="Review — nothing has been written yet">
+          <s-section heading="Review">
             <s-stack direction="block" gap="base">
+              <Steps current={2} />
+
+              <s-banner tone="info">
+                <s-paragraph>
+                  Nothing has been written yet. This is what the file would do —
+                  the store changes only when you press the button at the
+                  bottom.
+                </s-paragraph>
+              </s-banner>
               <s-stack direction="inline" gap="small-300">
                 <s-badge tone="info">{plan.counts.update} to update</s-badge>
                 <s-badge tone="neutral">
@@ -799,7 +827,7 @@ export default function VariantMetafieldsPage() {
 
               {/* A wide plan table would otherwise push the whole embedded page
                   sideways on a narrow screen. */}
-              <div className={styles.tableScroll}>
+              <TableScroll>
                 <s-table>
                   <s-table-header-row>
                     <s-table-header>Row</s-table-header>
@@ -834,7 +862,7 @@ export default function VariantMetafieldsPage() {
                     ))}
                   </s-table-body>
                 </s-table>
-              </div>
+              </TableScroll>
 
               {plan.rows.length > 100 && (
                 <s-paragraph>
@@ -843,7 +871,7 @@ export default function VariantMetafieldsPage() {
                 </s-paragraph>
               )}
 
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="button"
                   variant="primary"
@@ -864,7 +892,7 @@ export default function VariantMetafieldsPage() {
                     plan.productDeleteCount}{" "}
                   change(s)
                 </s-button>
-              </div>
+              </Actions>
             </s-stack>
           </s-section>
         )}
@@ -872,6 +900,7 @@ export default function VariantMetafieldsPage() {
         {data?.step === "applied" && (
           <s-section heading="Update finished">
             <s-stack direction="block" gap="base">
+              <Steps current={3} />
               <s-banner tone={data.failures.length ? "warning" : "success"}>
                 <s-paragraph>
                   {data.variants} variant(s) and {data.products} product(s):{" "}

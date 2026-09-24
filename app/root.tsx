@@ -1,5 +1,10 @@
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
 
+// The design tokens the light-DOM wrappers are built from — Shopify's own
+// spacing, type, and colour values. Imported here rather than per-route so the
+// custom properties are defined before any component that reads them renders.
+import "./styles/tokens.css";
+
 export default function App() {
   return (
     <html lang="en">

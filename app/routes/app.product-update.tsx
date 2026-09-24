@@ -53,7 +53,13 @@ import {
 } from "../lib/product-write.server";
 import { listMetafieldDefinitions } from "../lib/product-metafields.server";
 import { listDefinitions } from "../lib/metaobjects.server";
-import styles from "./app._index/styles.module.css";
+import { Guide } from "../components/ui/Guide";
+import {
+  Actions,
+  CsvDropZone,
+  Steps,
+  TableScroll,
+} from "../components/ui/ImportFlow";
 
 // Update products from a CSV without deleting and recreating them.
 //
@@ -244,7 +250,10 @@ async function buildPlan(
 > {
   const rows = parseCsv(csv);
   if (rows.length < 2) {
-    return { ok: false, message: "That file has a header row but no data rows." };
+    return {
+      ok: false,
+      message: "That file has a header row but no data rows.",
+    };
   }
   if (rows.length - 1 > MAX_ROWS) {
     return {
@@ -351,7 +360,11 @@ async function buildPlan(
     defaultTypeFor,
   );
   const categories = await resolveCategories(admin, grouped.rows);
-  const referencedProducts = await resolveProductRefs(admin, grouped.rows, resolved);
+  const referencedProducts = await resolveProductRefs(
+    admin,
+    grouped.rows,
+    resolved,
+  );
 
   const context: PlanContext = {
     products,
@@ -479,7 +492,9 @@ async function metaobjectTypesById(
   if (!needed) return new Map();
 
   const definitions = await listDefinitions(admin);
-  return new Map(definitions.map((definition) => [definition.id, definition.type]));
+  return new Map(
+    definitions.map((definition) => [definition.id, definition.type]),
+  );
 }
 
 /** Resolve the distinct category names the file uses to taxonomy ids. */
@@ -639,7 +654,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         const quantities = product.variants
           .map((variant) => variant.inventory)
-          .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+          .filter((entry): entry is NonNullable<typeof entry> =>
+            Boolean(entry),
+          );
 
         if (quantities.length && locationId) {
           const result = await setInventoryQuantities(
@@ -648,7 +665,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             quantities,
           );
           if (result.ok) wrote = true;
-          else failures.push(`${label} (inventory): ${result.errors.join("; ")}`);
+          else
+            failures.push(`${label} (inventory): ${result.errors.join("; ")}`);
         }
 
         // Values and removals travel in the same plan but through different
@@ -677,7 +695,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (writes.length) {
           const result = await setMetafields(admin, writes);
           if (result.ok) wrote = true;
-          else failures.push(`${label} (metafields): ${result.errors.join("; ")}`);
+          else
+            failures.push(`${label} (metafields): ${result.errors.join("; ")}`);
         }
 
         if (removals.length) {
@@ -713,12 +732,21 @@ export default function ProductUpdatePage() {
   const data = fetcher.data;
   const busy = fetcher.state !== "idle";
 
+  // Four beats here rather than the usual three: this page reads the file's
+  // columns and lets you correct the guesses before anything is planned.
+  const step: number =
+    data?.step === "applied"
+      ? 4
+      : data?.step === "plan"
+        ? 3
+        : data?.step === "inspect"
+          ? 2
+          : 1;
+
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [exportLocation, setExportLocation] = useState(
-    locations[0]?.id ?? "",
-  );
+  const [exportLocation, setExportLocation] = useState(locations[0]?.id ?? "");
 
   // The picker's groups are the mapping dropdown's groups, in the same order,
   // because they are built from the same targets by the same `groupOf`.
@@ -875,8 +903,8 @@ export default function ProductUpdatePage() {
         <s-stack direction="block" gap="base">
           <s-paragraph>
             Download the products you want to edit, with only the columns you
-            want to see, then edit the cells and bring the file back here.
-            The headings are Shopify&rsquo;s own, so the file you get{" "}
+            want to see, then edit the cells and bring the file back here. The
+            headings are Shopify&rsquo;s own, so the file you get{" "}
             <strong>needs no mapping on the way back in</strong> — and
             re-importing one you have not edited plans no changes at all, which
             is the quickest way to check a column means what you think.
@@ -936,7 +964,7 @@ export default function ProductUpdatePage() {
             </s-banner>
           )}
 
-          <div className={styles.actions}>
+          <Actions>
             <s-button
               variant="primary"
               onClick={runExport}
@@ -945,7 +973,7 @@ export default function ProductUpdatePage() {
               Download {exportColumns.size} column
               {exportColumns.size === 1 ? "" : "s"}
             </s-button>
-          </div>
+          </Actions>
         </s-stack>
       </s-section>
 
@@ -957,64 +985,73 @@ export default function ProductUpdatePage() {
       >
         <s-section heading="Your file">
           <s-stack direction="block" gap="base">
-            <s-paragraph>
-              Updates products that already exist, in place. Shopify&rsquo;s own
-              import with &ldquo;overwrite&rdquo; <strong>deletes and
-              recreates</strong> each product, which takes its metafields,
-              videos, translations and collection memberships with it. This page
-              never does that: it changes only the fields your file names, on the
-              product that is already there.
-            </s-paragraph>
+            <Steps
+              current={step}
+              labels={[
+                "Your file",
+                "Match the columns",
+                "Review changes",
+                "Apply",
+              ]}
+            />
 
-            <s-paragraph>
-              An <strong>empty cell is skipped</strong>, never written as a
-              blank, so a partly-filled spreadsheet cannot erase anything —
-              unless you turn on <strong>Clear fields left empty</strong> in the
-              next step, which reverses that for this run only. A value that
-              already matches is not written at all, so re-running the same file
-              is free and a run that times out is safe to repeat.
-            </s-paragraph>
+            <Guide
+              id="product-update-file"
+              title="What this changes, and how rows are matched"
+            >
+              <s-stack direction="block" gap="small-200">
+                <s-paragraph>
+                  Updates products that already exist, in place. Shopify&rsquo;s
+                  own import with &ldquo;overwrite&rdquo;{" "}
+                  <strong>deletes and recreates</strong> each product, which
+                  takes its metafields, videos, translations and collection
+                  memberships with it. This page never does that: it changes
+                  only the fields your file names, on the product that is
+                  already there.
+                </s-paragraph>
 
-            <s-paragraph>
-              Rows are matched by <strong>Handle</strong>, then{" "}
-              <strong>Title</strong>, then <strong>Variant SKU</strong> —
-              whichever your file has, in that order. A SKU-only file is enough
-              on its own: the product is whatever variant carries that SKU, so a
-              supplier price list of just SKU and price works without pasting
-              handles into it first. A row matching no product is reported as an
-              error — products are never created.
-            </s-paragraph>
+                <s-paragraph>
+                  An <strong>empty cell is skipped</strong>, never written as a
+                  blank, so a partly-filled spreadsheet cannot erase anything —
+                  unless you turn on <strong>Clear fields left empty</strong> in
+                  the next step, which reverses that for this run only. A value
+                  that already matches is not written at all, so re-running the
+                  same file is free and a run that times out is safe to repeat.
+                </s-paragraph>
 
-            <s-paragraph>
-              Within a product, variants are matched by{" "}
-              <s-text>Variant SKU</s-text>, then by their option values.
-              Variants your file does not mention are left untouched, and none
-              are ever created or deleted.
-            </s-paragraph>
+                <s-paragraph>
+                  Rows are matched by <strong>Handle</strong>, then{" "}
+                  <strong>Title</strong>, then <strong>Variant SKU</strong> —
+                  whichever your file has, in that order. A SKU-only file is
+                  enough on its own: the product is whatever variant carries
+                  that SKU, so a supplier price list of just SKU and price works
+                  without pasting handles into it first. A row matching no
+                  product is reported as an error — products are never created.
+                </s-paragraph>
 
-            <s-paragraph>
-              A Shopify product export needs no setup — its columns are
-              recognised automatically, and so are the everyday spellings a
-              hand-made sheet uses (<s-text>Price</s-text>,{" "}
-              <s-text>SKU</s-text>, <s-text>Quantity</s-text>,{" "}
-              <s-text>Description</s-text>). Anything else can be pointed at a
-              field by hand below, and every guess can be changed or switched
-              off there.
-            </s-paragraph>
+                <s-paragraph>
+                  Within a product, variants are matched by{" "}
+                  <s-text>Variant SKU</s-text>, then by their option values.
+                  Variants your file does not mention are left untouched, and
+                  none are ever created or deleted.
+                </s-paragraph>
 
-            <label className={styles.fileField}>
-              <span className={styles.fileLabel}>CSV file</span>
-              <input
-                className={styles.fileInput}
-                type="file"
-                name="file"
-                accept=".csv,text/csv"
-                required
-              />
-            </label>
+                <s-paragraph>
+                  A Shopify product export needs no setup — its columns are
+                  recognised automatically, and so are the everyday spellings a
+                  hand-made sheet uses (<s-text>Price</s-text>,{" "}
+                  <s-text>SKU</s-text>, <s-text>Quantity</s-text>,{" "}
+                  <s-text>Description</s-text>). Anything else can be pointed at
+                  a field by hand below, and every guess can be changed or
+                  switched off there.
+                </s-paragraph>
+              </s-stack>
+            </Guide>
+
+            <CsvDropZone name="file" label="CSV file" accept=".csv,text/csv" />
 
             {!report && (
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="button"
                   onClick={submitWith("")}
@@ -1022,7 +1059,7 @@ export default function ProductUpdatePage() {
                 >
                   Read columns
                 </s-button>
-              </div>
+              </Actions>
             )}
           </s-stack>
         </s-section>
@@ -1048,9 +1085,7 @@ export default function ProductUpdatePage() {
 
               {report.ignored.length > 0 && (
                 <s-stack direction="block" gap="small-300">
-                  <s-paragraph>
-                    Read and deliberately not written:
-                  </s-paragraph>
+                  <s-paragraph>Read and deliberately not written:</s-paragraph>
                   <s-unordered-list>
                     {report.ignored.slice(0, 20).map((entry) => (
                       <s-list-item key={entry.column}>
@@ -1093,7 +1128,7 @@ export default function ProductUpdatePage() {
 
               {/* A wide mapping table would otherwise push the whole embedded
                   page sideways on a narrow screen. */}
-              <div className={styles.tableScroll}>
+              <TableScroll>
                 <s-table>
                   <s-table-header-row>
                     <s-table-header>Column in your file</s-table-header>
@@ -1140,9 +1175,9 @@ export default function ProductUpdatePage() {
                     ))}
                   </s-table-body>
                 </s-table>
-              </div>
+              </TableScroll>
 
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="button"
                   onClick={submitWith("")}
@@ -1150,14 +1185,23 @@ export default function ProductUpdatePage() {
                 >
                   Review changes
                 </s-button>
-              </div>
+              </Actions>
             </s-stack>
           </s-section>
         )}
 
         {plan && (
-          <s-section heading="Review — nothing has been written yet">
+          <s-section heading="Review">
             <s-stack direction="block" gap="base">
+              <Steps current={3} />
+
+              <s-banner tone="info">
+                <s-paragraph>
+                  Nothing has been written yet. This is what the file would do —
+                  the store changes only when you press the button at the
+                  bottom.
+                </s-paragraph>
+              </s-banner>
               <s-stack direction="inline" gap="small-300">
                 <s-badge tone="info">{plan.counts.update} to update</s-badge>
                 <s-badge tone="neutral">
@@ -1174,8 +1218,8 @@ export default function ProductUpdatePage() {
                 <s-banner tone="warning">
                   <s-paragraph>
                     <strong>Clear fields left empty</strong> is on. Every change
-                    ending in &ldquo;&mdash;&rdquo; below erases what the product
-                    currently holds. Check those before applying.
+                    ending in &ldquo;&mdash;&rdquo; below erases what the
+                    product currently holds. Check those before applying.
                   </s-paragraph>
                 </s-banner>
               )}
@@ -1193,7 +1237,7 @@ export default function ProductUpdatePage() {
                 </s-banner>
               )}
 
-              <div className={styles.tableScroll}>
+              <TableScroll>
                 <s-table>
                   <s-table-header-row>
                     <s-table-header>Product</s-table-header>
@@ -1228,12 +1272,14 @@ export default function ProductUpdatePage() {
                         </s-table-cell>
                         <s-table-cell>
                           <s-stack direction="block" gap="small-500">
-                            {product.changes.slice(0, 8).map((change, index) => (
-                              <s-text key={`${change.field}-${index}`}>
-                                {change.label}: {change.from || "—"} →{" "}
-                                {change.to || "—"}
-                              </s-text>
-                            ))}
+                            {product.changes
+                              .slice(0, 8)
+                              .map((change, index) => (
+                                <s-text key={`${change.field}-${index}`}>
+                                  {change.label}: {change.from || "—"} →{" "}
+                                  {change.to || "—"}
+                                </s-text>
+                              ))}
                             {product.changes.length > 8 && (
                               <s-text>
                                 …and {product.changes.length - 8} more
@@ -1250,7 +1296,7 @@ export default function ProductUpdatePage() {
                     ))}
                   </s-table-body>
                 </s-table>
-              </div>
+              </TableScroll>
 
               {plan.products.length > 100 && (
                 <s-paragraph>
@@ -1259,7 +1305,7 @@ export default function ProductUpdatePage() {
                 </s-paragraph>
               )}
 
-              <div className={styles.actions}>
+              <Actions>
                 <s-button
                   type="button"
                   variant="primary"
@@ -1269,7 +1315,7 @@ export default function ProductUpdatePage() {
                 >
                   Update {plan.writeCount} product(s)
                 </s-button>
-              </div>
+              </Actions>
             </s-stack>
           </s-section>
         )}
@@ -1286,18 +1332,21 @@ export default function ProductUpdatePage() {
       {data?.step === "applied" && (
         <s-section heading="Update finished">
           <s-stack direction="block" gap="base">
+            <Steps current={4} />
             <s-banner tone={data.failures.length ? "warning" : "success"}>
               <s-paragraph>
                 {data.updated} product(s) updated, {data.failures.length}{" "}
-                problem(s). Nothing was deleted or recreated — every product kept
-                its metafields, media and collections.
+                problem(s). Nothing was deleted or recreated — every product
+                kept its metafields, media and collections.
               </s-paragraph>
             </s-banner>
 
             {data.failures.length > 0 && (
               <s-unordered-list>
                 {data.failures.slice(0, 100).map((failure, index) => (
-                  <s-list-item key={`${failure}-${index}`}>{failure}</s-list-item>
+                  <s-list-item key={`${failure}-${index}`}>
+                    {failure}
+                  </s-list-item>
                 ))}
               </s-unordered-list>
             )}
