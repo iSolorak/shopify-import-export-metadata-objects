@@ -895,17 +895,40 @@ export const PRODUCT_REFERENCE_TYPES = [
 ];
 
 /**
+ * Split a cell into the items of a list.
+ *
+ * Two spellings arrive here and both are Shopify's. A reference list comes out
+ * of a product export as `handle;handle`; a list of plain values comes out as
+ * **one per line** inside a quoted cell — which is also what a person typing
+ * into a spreadsheet does, since Alt+Enter is easier than remembering a
+ * separator.
+ *
+ * Splitting on only the first of those is what made a `Sizes` column of
+ * "30ml / 50ml / 100ml" arrive as a single item with two newlines in it, and
+ * every `single_line_text_field` item in the API rejects that: "Value must be a
+ * single line text string". The cell was fine; the reader was not.
+ *
+ * Callers holding a type whose items may themselves contain newlines — the one
+ * case is `list.multi_line_text_field` — pass `lines: false` and keep to `;`.
+ */
+function listItems(cell: string, lines = true): string[] {
+  return cell
+    .split(lines ? /[;\r\n]+/ : ";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
  * Product handles a cell refers to, so they can be resolved in one pass.
  *
  * `handle;handle`, the spelling Shopify's own product export uses for a
  * product-reference list — and the one the Oscar side writes for
- * `shopify--discovery--product_recommendation.related_products`.
+ * `shopify--discovery--product_recommendation.related_products`. One per line
+ * is read too; a handle can hold neither a newline nor a semicolon, so nothing
+ * is ambiguous about accepting both.
  */
 export function productRefsIn(cell: string): string[] {
-  return cell
-    .split(";")
-    .map((part) => part.trim())
-    .filter(Boolean);
+  return listItems(cell);
 }
 
 /** Metafield types whose value is a metaobject gid. */
@@ -935,10 +958,7 @@ export function metaobjectRefsIn(
   cell: string,
   defaultType?: string,
 ): { type: string; handle: string }[] {
-  return cell
-    .split(";")
-    .map((part) => part.trim())
-    .filter(Boolean)
+  return listItems(cell)
     .map((part) => {
       const separator = part.indexOf(":");
       if (separator === -1) {
@@ -1055,24 +1075,67 @@ export function toMetafieldValue(
   }
 
   // A list of anything else is a JSON array. A cell already holding one is
-  // passed through, so a file exported by Shopify's own tooling round-trips.
+  // passed through, so a file exported by this app's own export round-trips.
   if (type.startsWith("list.")) {
     if (trimmed.startsWith("[")) {
+      let parsed: unknown;
       try {
-        JSON.parse(trimmed);
-        return { ok: true, value: trimmed };
+        parsed = JSON.parse(trimmed);
       } catch {
         return { ok: false, message: "Looks like JSON but does not parse." };
       }
+      // A JSON array of single-line items is validated item by item for the
+      // same reason the plain cell below is: the API rejects an item holding a
+      // newline with "Value must be a single line text string", naming neither
+      // the column nor the product.
+      if (type === "list.single_line_text_field" && Array.isArray(parsed)) {
+        const bad = parsed.find(
+          (item) => typeof item === "string" && /[\r\n]/.test(item),
+        );
+        if (bad !== undefined) {
+          return {
+            ok: false,
+            message: `This field holds a list of single lines of text, but one item spans several (${JSON.stringify(
+              bad,
+            )}). Split it into separate items, or put it on one line.`,
+          };
+        }
+      }
+      return { ok: true, value: trimmed };
     }
+    // One item per line is how Shopify's product export writes a list of
+    // values, and `;` is how it writes a list of references. Both are read —
+    // except for a list of multi-line text, whose items are allowed to contain
+    // the newlines that would otherwise split them.
     return {
       ok: true,
       value: JSON.stringify(
-        trimmed
-          .split(";")
-          .map((part) => part.trim())
-          .filter(Boolean),
+        listItems(trimmed, type !== "list.multi_line_text_field"),
       ),
+    };
+  }
+
+  // A single-line field with a multi-line cell.
+  //
+  // Caught here rather than left to the API, which rejects it half way through
+  // a run with "metafields.0.value: Value must be a single line text string" —
+  // a message naming no column, no product and no file. This one names all
+  // three by the time the review step has wrapped it, and it appears *before*
+  // anything is written.
+  //
+  // Not joined up automatically: several lines in a cell almost always means
+  // the value was a list where it came from, and picking a separator on the
+  // merchant's behalf would quietly invent a value nobody chose.
+  if (type === "single_line_text_field" && /[\r\n]/.test(trimmed)) {
+    const lines = listItems(trimmed);
+    return {
+      ok: false,
+      message: `This field holds one line of text, but the cell has ${lines.length} (${lines
+        .slice(0, 3)
+        .map((line) => `"${line}"`)
+        .join(
+          ", ",
+        )}${lines.length > 3 ? ", …" : ""}). Put them on one line, or change the metafield definition to a list of single-line text and import again.`,
     };
   }
 
